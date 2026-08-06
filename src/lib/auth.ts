@@ -1,0 +1,136 @@
+"use client";
+
+/**
+ * Hermes OS v2 — Local auth: PIN (hashed) + WebAuthn biometric unlock.
+ * Local-first, no server. PIN hash + credential id live in localStorage.
+ */
+
+const PIN_KEY = "hermesos.pin.hash";
+const CRED_KEY = "hermesos.webauthn.cred";
+const UNLOCK_KEY = "hermesos.unlocked";
+
+/** SHA-256 via WebCrypto — salted with a static local pepper (not a secret, just obfuscation). */
+export async function hashPin(pin: string): Promise<string> {
+  const data = new TextEncoder().encode(`hermes-os:${pin}:v1`);
+  try {
+    if (crypto?.subtle?.digest) {
+      const digest = await crypto.subtle.digest("SHA-256", data);
+      return Array.from(new Uint8Array(digest))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+    }
+  } catch {
+    // fall through to JS fallback
+  }
+  // Fallback (e.g. WebCrypto unavailable in some embedded contexts): FNV-1a 64-bit.
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (const c of `hermes-os:${pin}:v1`) {
+    h1 = Math.imul(h1 ^ c.charCodeAt(0), 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ c.charCodeAt(0), 0x85ebca6b) >>> 0;
+  }
+  return `${h1.toString(16).padStart(8, "0")}${h2.toString(16).padStart(8, "0")}`;
+}
+
+export function isPinSet(): boolean {
+  return !!localStorage.getItem(PIN_KEY);
+}
+
+export async function setPin(pin: string): Promise<void> {
+  localStorage.setItem(PIN_KEY, await hashPin(pin));
+}
+
+export async function verifyPin(pin: string): Promise<boolean> {
+  const stored = localStorage.getItem(PIN_KEY);
+  if (!stored) return false;
+  return (await hashPin(pin)) === stored;
+}
+
+export function isUnlocked(): boolean {
+  const until = Number(localStorage.getItem(UNLOCK_KEY) ?? "0");
+  return Date.now() < until;
+}
+
+/** Unlock for the session (e.g. 12h) so the app doesn't nag on every reload. */
+export function markUnlocked(hours = 12): void {
+  localStorage.setItem(UNLOCK_KEY, String(Date.now() + hours * 3600 * 1000));
+}
+
+export function lockNow(): void {
+  localStorage.removeItem(UNLOCK_KEY);
+}
+
+/* ── WebAuthn (biometric) ─────────────────────────────────────────── */
+
+const RP_ID = typeof window !== "undefined" ? window.location.hostname : "localhost";
+const RP_NAME = "Hermes OS";
+
+export function biometricSupported(): boolean {
+  return typeof window !== "undefined" && !!(
+    window.PublicKeyCredential &&
+    typeof window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === "function"
+  );
+}
+
+/** Register a platform authenticator (fingerprint / FaceID). */
+export async function registerBiometric(): Promise<boolean> {
+  if (!biometricSupported()) return false;
+
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const cred = await navigator.credentials.create({
+    publicKey: {
+      challenge,
+      rp: { id: RP_ID, name: RP_NAME },
+      user: {
+        id: crypto.getRandomValues(new Uint8Array(16)),
+        name: "akhil",
+        displayName: "Akhil Pillay",
+      },
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+      authenticatorSelection: {
+        authenticatorAttachment: "platform", // fingerprint / FaceID only
+        userVerification: "required",
+      },
+      timeout: 60000,
+    },
+  });
+
+  if (!cred) return false;
+  localStorage.setItem(CRED_KEY, cred.id);
+  return true;
+}
+
+export function hasBiometric(): boolean {
+  return !!localStorage.getItem(CRED_KEY);
+}
+
+/** Verify via platform authenticator. */
+export async function authenticateBiometric(): Promise<boolean> {
+  if (!biometricSupported()) return false;
+  const credId = localStorage.getItem(CRED_KEY);
+  if (!credId) return false;
+
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  try {
+    const assertion = await navigator.credentials.get({
+      publicKey: {
+        challenge,
+        allowCredentials: [{ type: "public-key", id: base64UrlToBuffer(credId) }],
+        userVerification: "required",
+        timeout: 60000,
+      },
+    });
+    return !!assertion;
+  } catch {
+    return false;
+  }
+}
+
+function base64UrlToBuffer(b64url: string): Uint8Array<ArrayBuffer> {
+  const pad = b64url.replace(/-/g, "+").replace(/_/g, "/");
+  const b64 = pad + "=".repeat((4 - (pad.length % 4)) % 4);
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}

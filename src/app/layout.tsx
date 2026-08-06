@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import { ThemeProvider } from "next-themes";
 import "./globals.css";
 import { Shell } from "@/components/shell/Shell";
+import { AuthGate } from "@/components/shell/AuthGate";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
@@ -31,7 +32,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       <body className="min-h-full">
         <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
           <div className="particle-bg" aria-hidden="true" />
-          <Shell>{children}</Shell>
+          <AuthGate>
+            <Shell>{children}</Shell>
+          </AuthGate>
         </ThemeProvider>
       </body>
     </html>
