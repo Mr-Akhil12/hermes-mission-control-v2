@@ -8,6 +8,11 @@ export async function POST(request: Request) {
     }
 
     const apiBase = process.env.HERMES_API_URL ?? "http://127.0.0.1:8642";
+    // On Vercel (phone), route chat through the tunneled state server proxy
+    const DATA_URL = process.env.NEXT_PUBLIC_DATA_URL ?? "";
+    const proxyBase = DATA_URL && !apiBase.startsWith("http://127.0.0.1") && apiBase === "http://127.0.0.1:8642"
+      ? DATA_URL
+      : apiBase;
     const model = process.env.HERMES_API_MODEL ?? "deepseek-v4-flash:0731";
 
     const messages = [
@@ -28,7 +33,7 @@ export async function POST(request: Request) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 90000);
 
-    const res = await fetch(`${apiBase}/v1/chat/completions`, {
+    const res = await fetch(`${proxyBase}/v1/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model, messages, stream: false }),
