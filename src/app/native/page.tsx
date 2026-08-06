@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { AppWindow, RefreshCw } from "lucide-react";
 
-const NATIVE_URL = process.env.NEXT_PUBLIC_NATIVE_URL ?? "http://100.109.86.13:9119";
+const NATIVE_URL = process.env.NEXT_PUBLIC_NATIVE_URL ?? "http://172.21.184.37:9119";
 
 export default function NativePage() {
   const [offline, setOffline] = useState(false);

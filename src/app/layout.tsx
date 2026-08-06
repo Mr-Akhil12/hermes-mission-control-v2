@@ -4,6 +4,7 @@ import { ThemeProvider } from "next-themes";
 import "./globals.css";
 import { Shell } from "@/components/shell/Shell";
 import { AuthGate } from "@/components/shell/AuthGate";
+import { ParticleBackground } from "@/components/shell/ParticleBackground";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
@@ -31,7 +32,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     <html lang="en" suppressHydrationWarning className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
       <body className="min-h-full">
         <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
-          <div className="particle-bg" aria-hidden="true" />
+          <ParticleBackground />
           <AuthGate>
             <Shell>{children}</Shell>
           </AuthGate>
