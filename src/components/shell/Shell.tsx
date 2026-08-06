@@ -137,18 +137,18 @@ export function Shell({ children }: { children: React.ReactNode }) {
         <main className="flex-1 px-4 py-6 md:px-8">{children}</main>
       </div>
 
-      {/* Mobile bottom nav */}
+      {/* Mobile bottom nav — horizontally scrollable, ALL pages reachable */}
       <nav
-        className="fixed bottom-0 left-0 right-0 z-40 flex justify-around border-t px-2 py-2 backdrop-blur-md md:hidden"
-        style={{ borderColor: "var(--card-border)", background: "color-mix(in srgb, var(--bg-2) 92%, transparent)" }}
+        className="fixed bottom-0 left-0 right-0 z-40 flex items-center gap-1 overflow-x-auto border-t px-2 py-2 backdrop-blur-md md:hidden"
+        style={{ borderColor: "var(--card-border)", background: "color-mix(in srgb, var(--bg-2) 92%, transparent)", scrollbarWidth: "none" }}
       >
-        {[NAV[0], NAV[3], NAV[7], NAV[12], NAV[13]].map((item) => {
+        {NAV.map((item) => {
           const active = pathname === item.href;
           const Icon = item.icon;
           return (
-            <Link key={item.href} href={item.href} className="flex flex-col items-center gap-0.5 px-3 py-1" style={{ color: active ? "var(--accent)" : "var(--text-faint)" }}>
+            <Link key={item.href} href={item.href} className="flex shrink-0 flex-col items-center gap-0.5 px-3 py-1" style={{ color: active ? "var(--accent)" : "var(--text-faint)" }}>
               <Icon className="h-5 w-5" />
-              <span className="text-[10px] font-medium">{item.label.split(" ")[0]}</span>
+              <span className="text-[10px] font-medium whitespace-nowrap">{item.label}</span>
             </Link>
           );
         })}
