@@ -4,10 +4,11 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { AppWindow, RefreshCw } from "lucide-react";
 
 const NATIVE_URL = process.env.NEXT_PUBLIC_NATIVE_URL ?? "http://172.21.184.37:9119";
-// On Vercel (HTTPS), the iframe can't load an HTTP URL (mixed content).
-// Route through the tunneled state server proxy instead: /native/... → :9119.
+// Prefer the Tailscale funnel (real HTTPS, no ngrok interstitial) when set.
+// Falls back to the ngrok state-server proxy, then the direct LAN URL.
+const FUNNEL_URL = process.env.NEXT_PUBLIC_FUNNEL_URL ?? "https://akhils-pc.tail6d629e.ts.net";
 const DATA_URL = process.env.NEXT_PUBLIC_DATA_URL ?? "";
-const IFRAME_BASE = DATA_URL ? `${DATA_URL}/native` : NATIVE_URL;
+const IFRAME_BASE = FUNNEL_URL || (DATA_URL ? `${DATA_URL}/native` : NATIVE_URL);
 
 export default function NativePage() {
   const [offline, setOffline] = useState(false);
