@@ -135,6 +135,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             path = self.path.split("?")[0]
+            # Proxy the native Hermes dashboard (:9119) so the iframe can load
+            # it over HTTPS (mixed-content safe) through the tunnel.
+            if path.startswith("/native/"):
+                self._proxy_native(path)
+                return
             if path == "/api/crons":
                 self._json({"jobs": load_crons(), "source": "local"})
             elif path == "/api/runs":
@@ -155,6 +160,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "not found"}, 404)
         except Exception as e:
             self._json({"error": str(e)}, 500)
+
+    def _proxy_native(self, path: str) -> None:
+        """Proxy a request to the native Hermes dashboard (:9119)."""
+        import urllib.request as u
+        native = os.environ.get("NATIVE_URL", "http://127.0.0.1:9119")
+        target = f"{native}{path}"
+        try:
+            req = u.Request(target)
+            with u.urlopen(req, timeout=15) as resp:
+                data = resp.read()
+                ctype = resp.headers.get("Content-Type", "text/html")
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self._json({"error": str(e)}, 502)
 
     def do_POST(self):
         """Proxy chat completions to the local Hermes API (:8642) so one

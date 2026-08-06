@@ -1,0 +1,17 @@
+[Unit]
+Description=Hermes OS v2 — Turso bridge + state server (survives reboots)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=akhil
+WorkingDirectory=/home/akhil/hermes-mission-control-v2
+ExecStart=/bin/bash /home/akhil/hermes-mission-control-v2/bridge/run_all.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -4,11 +4,15 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { AppWindow, RefreshCw } from "lucide-react";
 
 const NATIVE_URL = process.env.NEXT_PUBLIC_NATIVE_URL ?? "http://172.21.184.37:9119";
+// On Vercel (HTTPS), the iframe can't load an HTTP URL (mixed content).
+// Route through the tunneled state server proxy instead: /native/... → :9119.
+const DATA_URL = process.env.NEXT_PUBLIC_DATA_URL ?? "";
+const IFRAME_BASE = DATA_URL ? `${DATA_URL}/native` : NATIVE_URL;
 
 export default function NativePage() {
   const [offline, setOffline] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [src, setSrc] = useState(`${NATIVE_URL}/`);
+  const [src, setSrc] = useState(`${IFRAME_BASE}/`);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const checkTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -16,7 +20,7 @@ export default function NativePage() {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(`${NATIVE_URL}/login`, { signal: controller.signal, mode: "no-cors" });
+      const res = await fetch(`${IFRAME_BASE}/login`, { signal: controller.signal, mode: "no-cors" });
       clearTimeout(timer);
       setOffline(false);
       return true;
@@ -48,7 +52,7 @@ export default function NativePage() {
         <button
           onClick={() => {
             setLoading(true);
-            setSrc(`${NATIVE_URL}/?ts=${Date.now()}`);
+            setSrc(`${IFRAME_BASE}/?ts=${Date.now()}`);
             setTimeout(() => setLoading(false), 1500);
             checkConnection();
           }}
