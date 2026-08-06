@@ -8,11 +8,13 @@ export async function POST(request: Request) {
     }
 
     const apiBase = process.env.HERMES_API_URL ?? "http://127.0.0.1:8642";
-    // On Vercel (phone), route chat through the tunneled state server proxy
+    // On Vercel (phone), route chat through the tunneled state server proxy.
+    // DATA_URL is the ngrok tunnel (public HTTPS) → the state server forwards
+    // to the local Hermes API on :8642. If DATA_URL is empty, fall back to the
+    // direct API base (local dev).
     const DATA_URL = process.env.NEXT_PUBLIC_DATA_URL ?? "";
-    const proxyBase = DATA_URL && !apiBase.startsWith("http://127.0.0.1") && apiBase === "http://127.0.0.1:8642"
-      ? DATA_URL
-      : apiBase;
+    const proxyBase =
+      DATA_URL && apiBase.startsWith("http://127.0.0.1") ? DATA_URL : apiBase;
     const model = process.env.HERMES_API_MODEL ?? "deepseek-v4-flash:0731";
 
     const messages = [
