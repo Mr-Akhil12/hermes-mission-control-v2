@@ -64,6 +64,7 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 | 3 | Cron Monitor crash "object as React child" | `schedule` is `{kind,expr,display}` not string | Type guard + display fallback | ✅ |
 | 4 | Thinking viewer never shows | `setThinkingFor(null)` in `finally` wiped state before render | Only null on error | ✅ |
 | 5 | Native embed blank in iframe | Mixed content: HTTP iframe inside HTTPS page silently blocked | HTTPS proxy via state server `/native/*` | ✅ |
+| 13 | Native embed white on mobile | Third-party cookie block: SameSite=Lax session cookies dropped in cross-origin iframe | Same-origin proxy `/native-proxy/*` (server-side fetch + path rewrite + first-party cookies) | ✅ |
 | 6 | Turso 400 Bad Request | v2 API needs `requests` not `statements` + typed args | Rewrote client with `_typed_args` | ✅ |
 | 7 | Production still "remote" not "turso" | `TURSO_URL` set to `libsql://` scheme, fetch needs `https://` | Fixed env var | ✅ |
 | 8 | ngrok browser warning interstitial | Free-tier interstitial page | `--request-header-add ngrok-skip-browser-warning: true` | ✅ |
