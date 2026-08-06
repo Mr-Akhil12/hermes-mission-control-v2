@@ -25,10 +25,10 @@ function rewriteBody(body: string): string {
 
 export async function handler(
   request: NextRequest,
-  { params }: { params: Promise<{ path: string[] }> }
+  { params }: { params: Promise<{ path?: string[] }> }
 ) {
   const { path } = await params;
-  const pathname = path.length ? `/${path.join("/")}` : "/";
+  const pathname = path?.length ? `/${path.join("/")}` : "/";
   const search = request.nextUrl.search;
   const target = `${FUNNEL}${pathname}${search}`;
 
