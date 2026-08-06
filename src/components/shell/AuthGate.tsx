@@ -225,8 +225,8 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           )}
         </div>
 
-        <div className="mt-6 flex items-center justify-center gap-1.5 text-[11px]" style={{ color: "var(--text-faint)" }}>
-          <ShieldCheck className="h-3.5 w-3.5" /> Local-only — PIN hashed in your browser, nothing sent to a server
+        <div className="mt-6 flex items-start justify-center gap-1.5 text-[11px] leading-relaxed" style={{ color: "var(--text-faint)" }}>
+          <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" /> <span>Local-only — PIN hashed in your browser, nothing sent to a server</span>
         </div>
       </div>
     </div>

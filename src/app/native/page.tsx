@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { AppWindow, RefreshCw } from "lucide-react";
+import { AppWindow, RefreshCw, ExternalLink } from "lucide-react";
 
 const NATIVE_URL = process.env.NEXT_PUBLIC_NATIVE_URL ?? "http://172.21.184.37:9119";
 // Prefer the Tailscale funnel (real HTTPS, no ngrok interstitial) when set.
@@ -15,7 +15,6 @@ export default function NativePage() {
   const [loading, setLoading] = useState(true);
   const [src, setSrc] = useState(`${IFRAME_BASE}/login`);
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const checkTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Connection check: rely on the iframe's onLoad/onError instead of fetch —
   // fetch to the funnel is CORS-blocked even when the server is up (false positive).
@@ -29,34 +28,40 @@ export default function NativePage() {
     setLoading(false);
   }, []);
 
-  useEffect(() => {
-    // No grace timer — the tape only shows on a real iframe onError.
-    // onLoad clears it. This avoids false positives from CORS-blocked fetches.
-  }, []);
-
   return (
     <div className="relative mx-auto max-w-[1600px]">
-      <div className="mb-4 flex items-center justify-between">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-bold">
             <AppWindow className="h-6 w-6" style={{ color: "var(--accent)" }} /> Native UI
           </h1>
           <p className="text-sm" style={{ color: "var(--text-dim)" }}>
-            The whole native Hermes dashboard, embedded via Tailscale ({NATIVE_URL.replace("http://", "")}). Works on your phone with the Tailscale app running.
+            The whole native Hermes dashboard. If the embed looks blank, open it in a new tab — that always works.
           </p>
         </div>
-        <button
-          onClick={() => {
-            setLoading(true);
-            setOffline(false);
-            setSrc(`${IFRAME_BASE}/login?ts=${Date.now()}`);
-            setTimeout(() => setLoading(false), 1500);
-          }}
-          className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"
-          style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}
-        >
-          <RefreshCw className="h-4 w-4" /> Reload
-        </button>
+        <div className="flex items-center gap-2">
+          <a
+            href={`${IFRAME_BASE}/`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white"
+            style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-2))" }}
+          >
+            <ExternalLink className="h-4 w-4" /> Open in new tab
+          </a>
+          <button
+            onClick={() => {
+              setLoading(true);
+              setOffline(false);
+              setSrc(`${IFRAME_BASE}/login?ts=${Date.now()}`);
+              setTimeout(() => setLoading(false), 1500);
+            }}
+            className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"
+            style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}
+          >
+            <RefreshCw className="h-4 w-4" /> Reload
+          </button>
+        </div>
       </div>
 
       {/* Frame */}
