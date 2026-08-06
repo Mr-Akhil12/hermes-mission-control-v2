@@ -9,11 +9,15 @@ const NATIVE_URL = process.env.NEXT_PUBLIC_NATIVE_URL ?? "http://172.21.184.37:9
 const FUNNEL_URL = process.env.NEXT_PUBLIC_FUNNEL_URL ?? "https://akhils-pc.tail6d629e.ts.net";
 const DATA_URL = process.env.NEXT_PUBLIC_DATA_URL ?? "";
 const IFRAME_BASE = FUNNEL_URL || (DATA_URL ? `${DATA_URL}/native` : NATIVE_URL);
+// Same-origin proxy: the iframe loads /native-proxy/* on THIS domain, and the
+// route handler fetches the funnel + rewrites absolute paths so cookies are
+// first-party and the SPA works inside the embed (no third-party cookie block).
+const PROXY_BASE = "/native-proxy";
 
 export default function NativePage() {
   const [offline, setOffline] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [src, setSrc] = useState(`${IFRAME_BASE}/login`);
+  const [src, setSrc] = useState(`${PROXY_BASE}/login`);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   // Connection check: rely on the iframe's onLoad/onError instead of fetch —
@@ -53,7 +57,7 @@ export default function NativePage() {
             onClick={() => {
               setLoading(true);
               setOffline(false);
-              setSrc(`${IFRAME_BASE}/login?ts=${Date.now()}`);
+              setSrc(`${PROXY_BASE}/login?ts=${Date.now()}`);
               setTimeout(() => setLoading(false), 1500);
             }}
             className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"
