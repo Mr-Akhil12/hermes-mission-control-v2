@@ -13,7 +13,7 @@ const IFRAME_BASE = FUNNEL_URL || (DATA_URL ? `${DATA_URL}/native` : NATIVE_URL)
 export default function NativePage() {
   const [offline, setOffline] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [src, setSrc] = useState(`${IFRAME_BASE}/`);
+  const [src, setSrc] = useState(`${IFRAME_BASE}/login`);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const checkTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -30,12 +30,8 @@ export default function NativePage() {
   }, []);
 
   useEffect(() => {
-    // Initial grace period: if the iframe hasn't loaded in 8s, show the tape.
-    const failTimer = setTimeout(() => {
-      setOffline(true);
-      setLoading(false);
-    }, 8000);
-    return () => clearTimeout(failTimer);
+    // No grace timer — the tape only shows on a real iframe onError.
+    // onLoad clears it. This avoids false positives from CORS-blocked fetches.
   }, []);
 
   return (
@@ -53,7 +49,7 @@ export default function NativePage() {
           onClick={() => {
             setLoading(true);
             setOffline(false);
-            setSrc(`${IFRAME_BASE}/?ts=${Date.now()}`);
+            setSrc(`${IFRAME_BASE}/login?ts=${Date.now()}`);
             setTimeout(() => setLoading(false), 1500);
           }}
           className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"
