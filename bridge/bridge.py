@@ -43,11 +43,30 @@ def turso_enabled() -> bool:
     return bool(TURSO_URL and TURSO_TOKEN)
 
 
+def _typed_args(params: list | None) -> list[dict]:
+    """Convert plain Python values to Turso v2 typed args."""
+    out = []
+    for p in params or []:
+        if p is None:
+            out.append({"type": "null", "value": None})
+        elif isinstance(p, bool):
+            out.append({"type": "integer", "value": "1" if p else "0"})
+        elif isinstance(p, int):
+            out.append({"type": "integer", "value": str(p)})
+        elif isinstance(p, float):
+            out.append({"type": "float", "value": str(p)})
+        else:
+            out.append({"type": "text", "value": str(p)})
+    return out
+
+
 def turso_query(sql: str, params: list | None = None) -> list[dict]:
-    """Execute a read query against Turso HTTP API."""
+    """Execute a read query against Turso HTTP API (v2 pipeline format)."""
     if not turso_enabled():
         return []
-    body = json.dumps({"statements": [{"q": sql, "params": params or []}]}).encode()
+    body = json.dumps({
+        "requests": [{"type": "execute", "stmt": {"sql": sql, "args": _typed_args(params)}}]
+    }).encode()
     req = urllib.request.Request(
         f"{TURSO_URL}/v2/pipeline",
         data=body,
@@ -57,17 +76,25 @@ def turso_query(sql: str, params: list | None = None) -> list[dict]:
         data = json.loads(resp.read())
     rows = []
     for result in data.get("results", []):
-        cols = result.get("cols", [])
-        for row in result.get("rows", []):
-            rows.append({c["name"]: v["value"] for c, v in zip(cols, row)})
+        if result.get("type") != "ok":
+            continue
+        resp = result.get("response", {})
+        if resp.get("type") != "execute":
+            continue
+        res = resp.get("result", {})
+        cols = [c["name"] for c in res.get("cols", [])]
+        for row in res.get("rows", []):
+            rows.append({c: v.get("value") for c, v in zip(cols, row)})
     return rows
 
 
 def turso_execute(sql: str, params: list | None = None) -> None:
-    """Execute a write statement against Turso HTTP API."""
+    """Execute a write statement against Turso HTTP API (v2 pipeline format)."""
     if not turso_enabled():
         return
-    body = json.dumps({"statements": [{"q": sql, "params": params or []}]}).encode()
+    body = json.dumps({
+        "requests": [{"type": "execute", "stmt": {"sql": sql, "args": _typed_args(params)}}]
+    }).encode()
     req = urllib.request.Request(
         f"{TURSO_URL}/v2/pipeline",
         data=body,
