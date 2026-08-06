@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Fingerprint, Lock, ShieldCheck, KeyRound } from "lucide-react";
 import {
   isUnlocked,
@@ -26,15 +26,47 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const [busy, setBusy] = useState(false);
   const [bioAvailable, setBioAvailable] = useState(false);
   const [bioEnabled, setBioEnabled] = useState(false);
+  const [bioTried, setBioTried] = useState(false);
+  const bioAutoRef = useRef(false);
 
+  // ── First-run detection: PIN is PERMANENT once set ──────────────
+  // If a PIN exists, we NEVER re-enter setup. The only way to change it
+  // is to manually clear localStorage (explicit secret change).
   useEffect(() => {
     setBioAvailable(biometricSupported());
     setBioEnabled(hasBiometric());
     setReady(true);
     setUnlocked(isUnlocked());
-    // First run: no PIN set → start setup flow
-    if (!isPinSet()) setStep("setup-pin");
+    if (!isPinSet()) {
+      setStep("setup-pin");
+    } else {
+      setStep("unlock");
+    }
   }, []);
+
+  // ── Auto-biometric on unlock: try fingerprint/FaceID FIRST ───────
+  // If biometrics are registered, attempt them automatically when the
+  // unlock screen appears. Only fall back to PIN if they fail/cancel.
+  useEffect(() => {
+    if (!ready || unlocked || step !== "unlock" || !bioEnabled || bioAutoRef.current) return;
+    bioAutoRef.current = true;
+    setBusy(true);
+    authenticateBiometric()
+      .then((ok) => {
+        if (ok) {
+          markUnlocked();
+          setUnlocked(true);
+        } else {
+          setBioTried(true);
+          setError("Biometric failed — enter your PIN.");
+        }
+      })
+      .catch(() => {
+        setBioTried(true);
+        setError("Biometric failed — enter your PIN.");
+      })
+      .finally(() => setBusy(false));
+  }, [ready, unlocked, step, bioEnabled]);
 
   const submitPin = async () => {
     setError(null);
@@ -47,7 +79,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       if (pin !== pinConfirm) return setError("PINs don't match.");
       await setPin(pin);
       markUnlocked();
-      // Offer biometric if available
+      // Offer biometric if available (first-run only)
       if (bioAvailable) {
         setStep("setup-biometric");
       } else {
@@ -55,7 +87,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       }
       return;
     }
-    // unlock
+    // unlock — PIN fallback
     setBusy(true);
     const ok = await verifyPin(pin);
     setBusy(false);
@@ -114,14 +146,14 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           {step === "setup-pin" && "Set a PIN to secure your dashboard."}
           {step === "setup-pin-confirm" && "Confirm your PIN."}
           {step === "setup-biometric" && "Add fingerprint / FaceID for one-tap unlock?"}
-          {step === "unlock" && "Enter your PIN or use biometrics."}
+          {step === "unlock" && (busy ? "Checking biometrics…" : bioTried ? "Enter your PIN." : "Unlock with biometrics or PIN.")}
         </p>
 
         {step !== "setup-biometric" && (
           <input
             type="password"
             inputMode="numeric"
-            autoFocus
+            autoFocus={step === "unlock" && bioTried}
             value={pin}
             onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
             onKeyDown={(e) => e.key === "Enter" && submitPin()}
@@ -167,7 +199,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
                 Skip for now
               </button>
             </>
-          ) : step === "unlock" && bioEnabled ? (
+          ) : step === "unlock" && bioEnabled && !bioTried ? (
             <>
               <button
                 onClick={bioUnlock}
@@ -177,7 +209,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
               >
                 <Fingerprint className="h-4 w-4" /> {busy ? "Verifying…" : "Unlock with biometrics"}
               </button>
-              <button onClick={submitPin} className="w-full rounded-xl border px-4 py-3 text-sm" style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}>
+              <button onClick={() => setBioTried(true)} className="w-full rounded-xl border px-4 py-3 text-sm" style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}>
                 Use PIN instead
               </button>
             </>
