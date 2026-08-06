@@ -17,27 +17,26 @@ export default function NativePage() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const checkTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const checkConnection = useCallback(async () => {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(`${IFRAME_BASE}/login`, { signal: controller.signal, mode: "no-cors" });
-      clearTimeout(timer);
-      setOffline(false);
-      return true;
-    } catch {
-      setOffline(true);
-      return false;
-    }
+  // Connection check: rely on the iframe's onLoad/onError instead of fetch —
+  // fetch to the funnel is CORS-blocked even when the server is up (false positive).
+  const handleLoad = useCallback(() => {
+    setOffline(false);
+    setLoading(false);
+  }, []);
+
+  const handleError = useCallback(() => {
+    setOffline(true);
+    setLoading(false);
   }, []);
 
   useEffect(() => {
-    checkConnection();
-    checkTimer.current = setInterval(checkConnection, 15000);
-    return () => {
-      if (checkTimer.current) clearInterval(checkTimer.current);
-    };
-  }, [checkConnection]);
+    // Initial grace period: if the iframe hasn't loaded in 8s, show the tape.
+    const failTimer = setTimeout(() => {
+      setOffline(true);
+      setLoading(false);
+    }, 8000);
+    return () => clearTimeout(failTimer);
+  }, []);
 
   return (
     <div className="relative mx-auto max-w-[1600px]">
@@ -53,9 +52,9 @@ export default function NativePage() {
         <button
           onClick={() => {
             setLoading(true);
+            setOffline(false);
             setSrc(`${IFRAME_BASE}/?ts=${Date.now()}`);
             setTimeout(() => setLoading(false), 1500);
-            checkConnection();
           }}
           className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"
           style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}
@@ -87,7 +86,8 @@ export default function NativePage() {
           title="Native Hermes Dashboard"
           className="h-full w-full"
           style={{ border: "none" }}
-          onLoad={() => setLoading(false)}
+          onLoad={handleLoad}
+          onError={handleError}
         />
 
         {offline && (
