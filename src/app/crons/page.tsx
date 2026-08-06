@@ -1,0 +1,236 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { Clock, ChevronDown, ChevronUp, ExternalLink, Brain, CheckCircle2, XCircle, Loader2 } from "lucide-react";
+
+type CronJob = {
+  job_id: string;
+  id?: string;
+  name: string;
+  schedule: string | { kind?: string; expr?: string; display?: string };
+  last_status: string | null;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  state: string;
+  no_agent: boolean;
+  script: string | null;
+};
+
+type Run = {
+  id?: string;
+  job_id: string;
+  status: string;
+  claimed_at: string;
+  started_at?: string | null;
+  finished_at: string | null;
+  error: string | null;
+};
+
+type Thinking = {
+  session_id: string;
+  prompt: string;
+  messages: { role: string; content: string }[];
+};
+
+export default function CronsPage() {
+  const [crons, setCrons] = useState<CronJob[]>([]);
+  const [runs, setRuns] = useState<Run[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [thinking, setThinking] = useState<Thinking | null>(null);
+  const [thinkingFor, setThinkingFor] = useState<string | null>(null);
+  const [thinkingLoading, setThinkingLoading] = useState(false);
+
+  useEffect(() => {
+    Promise.all([fetch("/api/crons").then((r) => r.json()), fetch("/api/runs").then((r) => r.json())])
+      .then(([c, r]) => {
+        setCrons(c.jobs ?? []);
+        setRuns(r.runs ?? []);
+      })
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const runsFor = (jobId: string) => runs.filter((r) => r.job_id === jobId).slice(0, 8);
+
+  const loadThinking = async (jobId: string, run?: Run) => {
+    setThinkingLoading(true);
+    setThinkingFor(jobId);
+    setThinking(null);
+    try {
+      const params = new URLSearchParams();
+      params.set("job", jobId);
+      if (run?.id) params.set("execution", run.id);
+      const res = await fetch(`/api/cron-thinking?${params.toString()}`);
+      const data = await res.json();
+      if (data.session_id) {
+        setThinking(data);
+      } else {
+        setThinking(null);
+        setThinkingFor(null);
+      }
+    } catch (e) {
+      setThinking(null);
+      setThinkingFor(null);
+    } finally {
+      setThinkingLoading(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-24">
+        <Loader2 className="h-6 w-6 animate-spin" style={{ color: "var(--accent)" }} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto max-w-6xl space-y-6">
+      <div>
+        <h1 className="text-2xl font-bold">Cron Monitor</h1>
+        <p className="text-sm" style={{ color: "var(--text-dim)" }}>
+          Run history, agent thinking, and output links for every scheduled job. Hourly report keeps you posted.
+        </p>
+      </div>
+
+      {error && (
+        <div className="card p-4 text-sm" style={{ color: "var(--red)" }}>Could not load: {error}</div>
+      )}
+
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <div className="card p-4">
+          <div className="text-2xl font-bold" style={{ color: "var(--accent)" }}>{crons.length}</div>
+          <div className="text-xs" style={{ color: "var(--text-faint)" }}>Total</div>
+        </div>
+        <div className="card p-4">
+          <div className="text-2xl font-bold" style={{ color: "var(--green)" }}>{crons.filter((c) => c.last_status === "ok").length}</div>
+          <div className="text-xs" style={{ color: "var(--text-faint)" }}>Healthy</div>
+        </div>
+        <div className="card p-4">
+          <div className="text-2xl font-bold" style={{ color: "var(--red)" }}>{crons.filter((c) => c.last_status === "error").length}</div>
+          <div className="text-xs" style={{ color: "var(--text-faint)" }}>Failed</div>
+        </div>
+        <div className="card p-4">
+          <div className="text-2xl font-bold" style={{ color: "var(--amber)" }}>{runs.length}</div>
+          <div className="text-xs" style={{ color: "var(--text-faint)" }}>Runs (24h)</div>
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        {crons.map((cron) => {
+          const cronId = cron.job_id ?? cron.id ?? "unknown";
+          const jobRuns = runsFor(cronId);
+          const isOpen = expanded === cronId;
+          const lastFailed = jobRuns.some((r) => r.status === "failed");
+
+          return (
+            <div key={cronId} className="card overflow-hidden" style={lastFailed ? { borderColor: "color-mix(in srgb, var(--red) 40%, transparent)" } : undefined}>
+              <button className="flex w-full items-center gap-3 p-4 text-left" onClick={() => setExpanded(isOpen ? null : cronId)}>
+                <span
+                  className="h-2.5 w-2.5 shrink-0 rounded-full"
+                  style={{ background: lastFailed ? "var(--red)" : cron.last_status === "ok" ? "var(--green)" : "var(--amber)" }}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-semibold">{cron.name}</span>
+                    {cron.no_agent && (
+                      <span className="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase" style={{ background: "rgba(77,159,255,0.12)", color: "var(--accent-2)" }}>
+                        script
+                      </span>
+                    )}
+                    {!cron.no_agent && (
+                      <span className="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase" style={{ background: "rgba(124,108,255,0.12)", color: "var(--accent)" }}>
+                        agent
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-0.5 text-xs" style={{ color: "var(--text-faint)" }}>
+                    {typeof cron.schedule === "string" ? cron.schedule : cron.schedule?.display ?? cron.schedule?.expr ?? "?"} · last {cron.last_run_at ? new Date(cron.last_run_at).toLocaleString("en-ZA", { timeZone: "Africa/Johannesburg" }) : "never"} · next {cron.next_run_at ? new Date(cron.next_run_at).toLocaleString("en-ZA", { timeZone: "Africa/Johannesburg" }) : "—"}
+                  </div>
+                </div>
+                {isOpen ? <ChevronUp className="h-4 w-4 shrink-0" style={{ color: "var(--text-faint)" }} /> : <ChevronDown className="h-4 w-4 shrink-0" style={{ color: "var(--text-faint)" }} />}
+              </button>
+
+              {isOpen && (
+                <div className="border-t p-4" style={{ borderColor: "var(--card-border)" }}>
+                  {/* Run history */}
+                  <h3 className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--text-faint)" }}>
+                    <Clock className="h-3.5 w-3.5" /> Run history
+                  </h3>
+                  {jobRuns.length === 0 ? (
+                    <div className="text-xs" style={{ color: "var(--text-faint)" }}>No runs in the last 25h.</div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {jobRuns.map((run, i) => (
+                        <div key={i} className="flex flex-wrap items-center gap-2 rounded-lg px-3 py-2 text-xs" style={{ background: "color-mix(in srgb, var(--bg) 60%, transparent)" }}>
+                          {run.status === "completed" || run.status === "ok" ? (
+                            <CheckCircle2 className="h-3.5 w-3.5" style={{ color: "var(--green)" }} />
+                          ) : run.status === "failed" ? (
+                            <XCircle className="h-3.5 w-3.5" style={{ color: "var(--red)" }} />
+                          ) : (
+                            <Clock className="h-3.5 w-3.5" style={{ color: "var(--amber)" }} />
+                          )}
+                          <span style={{ color: "var(--text-dim)" }}>{run.claimed_at?.replace("T", " ").slice(0, 16)}</span>
+                          <span className="font-medium">{run.status}</span>
+                          {run.error && <span className="truncate font-mono" style={{ color: "var(--red)" }} title={run.error}>{run.error.slice(0, 80)}</span>}
+                          {!cron.no_agent && (
+                            <button
+                              onClick={() => loadThinking(cronId, run)}
+                              className="ml-auto flex items-center gap-1 rounded-md px-2 py-1 font-semibold"
+                              style={{ color: "var(--accent)", background: "rgba(124,108,255,0.10)" }}
+                            >
+                              <Brain className="h-3 w-3" /> Thinking
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Thinking viewer */}
+                  {thinking && thinkingFor === cronId && (
+                    <div className="mt-4 rounded-lg border p-4" style={{ borderColor: "var(--card-border)" }}>
+                      <div className="mb-2 flex items-center justify-between">
+                        <h4 className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--accent)" }}>
+                          <Brain className="h-3.5 w-3.5" /> Agent thinking — {thinking.session_id.slice(0, 24)}…
+                        </h4>
+                        <button onClick={() => setThinking(null)} className="text-xs" style={{ color: "var(--text-faint)" }}>close</button>
+                      </div>
+                      <div className="max-h-80 space-y-2 overflow-y-auto text-xs">
+                        {thinking.messages.map((m, i) => (
+                          <div key={i} className="rounded-lg p-2" style={{ background: m.role === "assistant" ? "rgba(124,108,255,0.07)" : "color-mix(in srgb, var(--bg) 50%, transparent)" }}>
+                            <span className="font-bold uppercase" style={{ color: m.role === "assistant" ? "var(--accent)" : "var(--accent-2)" }}>{m.role}</span>
+                            <pre className="mt-1 whitespace-pre-wrap font-sans" style={{ color: "var(--text-dim)" }}>{m.content.slice(0, 1200)}</pre>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {thinkingLoading && thinkingFor === cronId && (
+                    <div className="mt-4 flex items-center gap-2 text-xs" style={{ color: "var(--text-faint)" }}>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading thinking…
+                    </div>
+                  )}
+
+                  {/* Footer meta */}
+                  <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]" style={{ color: "var(--text-faint)" }}>
+                    <span>ID: {cronId}</span>
+                    {cron.script && <span>· script: {cron.script}</span>}
+                    <span className="ml-auto">
+                      <a href="/crons" className="inline-flex items-center gap-1" style={{ color: "var(--accent-2)" }}>
+                        Output link <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}

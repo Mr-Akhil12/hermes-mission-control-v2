@@ -1,69 +1,141 @@
-import Image from "next/image";
+"use client";
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { AlertTriangle, CheckCircle2, ArrowRight, Send } from "lucide-react";
+
+type CronJob = {
+  job_id?: string;
+  id?: string;
+  name: string;
+  schedule: string | { kind?: string; expr?: string; display?: string };
+  last_status: string | null;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  state: string;
+};
+
+type Run = {
+  job_id: string;
+  status: string;
+  claimed_at: string;
+  finished_at: string | null;
+  error: string | null;
+};
 
 export default function Home() {
+  const [crons, setCrons] = useState<CronJob[]>([]);
+  const [runs, setRuns] = useState<Run[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    Promise.all([fetch("/api/crons").then((r) => r.json()), fetch("/api/runs").then((r) => r.json())])
+      .then(([c, r]) => {
+        setCrons(c.jobs ?? []);
+        setRuns(r.runs ?? []);
+      })
+      .catch((e) => setLoadError(String(e)));
+  }, []);
+
+  const cronId = (c: CronJob) => c.job_id ?? c.id ?? "unknown";
+  const failedIds = new Set(runs.filter((r) => r.status === "failed").map((r) => r.job_id));
+  const failed = crons.filter((c) => failedIds.has(cronId(c)));
+  const healthy = crons.filter((c) => c.last_status === "ok" && !failedIds.has(cronId(c)));
+
+  const now = new Date();
+  const dateStr = now.toLocaleDateString("en-ZA", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  const timeStr = now.toLocaleTimeString("en-ZA", { hour: "2-digit", minute: "2-digit", timeZone: "Africa/Johannesburg" });
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div className="mx-auto max-w-5xl space-y-6">
+      {/* Hero */}
+      <div className="card p-6">
+        <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--accent-2)" }}>
+          {dateStr} · {timeStr} SAST
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+        <h1 className="mt-2 text-2xl font-bold md:text-3xl">Good morning, Akhil.</h1>
+        <p className="mt-1 text-sm" style={{ color: "var(--text-dim)" }}>
+          {failed.length > 0
+            ? `${failed.length} cron${failed.length > 1 ? "s" : ""} need attention.`
+            : "All systems nominal. Nothing needs you right now."}
+        </p>
+      </div>
+
+      {loadError && (
+        <div className="card border-red-500/40 p-4 text-sm" style={{ color: "var(--red)" }}>
+          Could not load live state: {loadError}
         </div>
-      </main>
+      )}
+
+      {/* Attention queue */}
+      <section>
+        <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-wider" style={{ color: "var(--text-faint)" }}>
+          <AlertTriangle className="h-4 w-4" /> Needs attention
+        </h2>
+        {failed.length === 0 ? (
+          <div className="card flex items-center gap-3 p-4">
+            <CheckCircle2 className="h-5 w-5" style={{ color: "var(--green)" }} />
+            <span className="text-sm" style={{ color: "var(--text-dim)" }}>No failed crons in the last 24h.</span>
+          </div>
+        ) : (
+          <div className="grid gap-3 md:grid-cols-2">
+            {failed.map((c) => (
+              <div key={cronId(c)} className="card card-hover p-4" style={{ borderColor: "color-mix(in srgb, var(--red) 40%, transparent)" }}>
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="text-sm font-semibold">{c.name}</div>
+                    <div className="text-xs" style={{ color: "var(--text-faint)" }}>
+                      last run {c.last_run_at ? new Date(c.last_run_at).toLocaleString("en-ZA", { timeZone: "Africa/Johannesburg" }) : "—"}
+                    </div>
+                  </div>
+                  <span className="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase" style={{ background: "color-mix(in srgb, var(--red) 15%, transparent)", color: "var(--red)" }}>
+                    failed
+                  </span>
+                </div>
+                <Link href="/crons" className="mt-3 inline-flex items-center gap-1 text-xs font-semibold" style={{ color: "var(--accent)" }}>
+                  Investigate <ArrowRight className="h-3 w-3" />
+                </Link>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* Shipped / status summary */}
+      <section>
+        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider" style={{ color: "var(--text-faint)" }}>
+          System status
+        </h2>
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+          <div className="card p-4">
+            <div className="text-2xl font-bold" style={{ color: "var(--accent)" }}>{crons.length}</div>
+            <div className="text-xs" style={{ color: "var(--text-faint)" }}>Total crons</div>
+          </div>
+          <div className="card p-4">
+            <div className="text-2xl font-bold" style={{ color: "var(--green)" }}>{healthy.length}</div>
+            <div className="text-xs" style={{ color: "var(--text-faint)" }}>Healthy</div>
+          </div>
+          <div className="card p-4">
+            <div className="text-2xl font-bold" style={{ color: "var(--red)" }}>{failed.length}</div>
+            <div className="text-xs" style={{ color: "var(--text-faint)" }}>Failed (24h)</div>
+          </div>
+          <div className="card p-4">
+            <div className="text-2xl font-bold" style={{ color: "var(--amber)" }}>{runs.length}</div>
+            <div className="text-xs" style={{ color: "var(--text-faint)" }}>Runs tracked</div>
+          </div>
+        </div>
+      </section>
+
+      {/* Dispatch CTA */}
+      <section className="card flex flex-col items-start gap-4 p-6 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-lg font-bold">Send work to Hermes</h2>
+          <p className="text-sm" style={{ color: "var(--text-dim)" }}>Quick dispatch from anywhere — ⌘K on desktop, or the Dispatch page.</p>
+        </div>
+        <Link href="/dispatch" className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white" style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-2))" }}>
+          <Send className="h-4 w-4" /> Dispatch
+        </Link>
+      </section>
     </div>
   );
 }
