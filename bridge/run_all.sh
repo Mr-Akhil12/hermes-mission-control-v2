@@ -10,11 +10,22 @@ export NATIVE_URL="http://127.0.0.1:9119"
 
 cd /home/akhil/hermes-mission-control-v2
 
+# Clean shutdown: kill children on SIGTERM so systemd restarts don't leave
+# duplicate bridge loops behind (KillMode=control-group + this trap).
+STATE_PID=""
+BRIDGE_PID=""
+cleanup() {
+  [ -n "$STATE_PID" ] && kill "$STATE_PID" 2>/dev/null
+  [ -n "$BRIDGE_PID" ] && kill "$BRIDGE_PID" 2>/dev/null
+  exit 0
+}
+trap cleanup TERM INT
+
 # Start the state server in the background
 python3 bridge/state_server.py &
 STATE_PID=$!
 
-# Run the bridge loop in the foreground (systemd tracks this)
+# Run the bridge loop in the background too (systemd tracks the wrapper)
 python3 bridge/bridge.py loop &
 BRIDGE_PID=$!
 
