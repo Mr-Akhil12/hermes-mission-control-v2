@@ -29,7 +29,7 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 |---|---|---|---|
 | Daily Brief (/) | ✅ | Turso (crons/runs) | 34 crons, 28 healthy, 500 runs |
 | Dispatch (/dispatch) | ✅ | :8642 via proxy | Real Hermes responses |
-| Approvals (/approvals) | 🟡 | Demo | Needs real Hermes approval wiring |
+| Approvals (/approvals) | ✅ | Real Hermes approval system | Run tracker captures `approval.request` (state server watcher), approve once/always/deny via `/v1/runs/{id}/approval`, history — verified 7 Aug |
 | Cron Monitor (/crons) | ✅ | Turso + state.db | Run history, thinking viewer, output links |
 | Agents (/agents) | ⬜ | — | Stub, Phase 3 (React Flow graph) |
 | Sessions (/sessions) | ✅ | state.db | Real transcripts, stop reasons |
@@ -121,7 +121,7 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 
 ### Phase 2 — Personal sections + real data everywhere (in progress)
 - [x] **Turso token-expiry watchdog** — **REPLACED with never-expiring tokens** (7 Aug): minted `--expiration never` tokens for dashboard + budget app, updated secrets.md + Vercel envs + Bitwarden. No watchdog needed — tokens never expire.
-- [ ] **Approvals real** — wire to Hermes approval mechanism, safety rules panel
+- [x] **Approvals real** — state-server run tracker captures `approval.request` SSE events into `~/.hermes/approvals.json`; dispatch switched to `/v1/runs`; approve once/always/deny wired to `/v1/runs/{id}/approval`; 15s auto-refresh + history
 - [ ] **Content Studio** — Turso `content_pipeline` kanban, viral scores, calendar
 - [ ] **Trading** — Turso `trades`/`strategy` read, P&L chart, risk meter
 - [ ] **Personal** — memory browser (Hermes memory API), Obsidian vault
