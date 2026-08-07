@@ -46,7 +46,7 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 | Piece | Status | Notes |
 |---|---|---|
 | Turso data layer | ✅ | tasks/sync_cache/briefs/artifacts tables |
-| Bridge (mirror → Turso) | ✅ | systemd, 30s loop, survives reboots |
+| Bridge (mirror → Turso) | ✅ | **systemd `hermes-os-bridge.service`** (enabled, control-group kill, TERM trap — no dup loops on restart) |
 | State server (:8645) | ✅ | systemd, serves crons/runs/sessions/artifacts + chat proxy |
 | Tailscale funnel | ✅ | Permanent HTTPS → :9119; **does WebSocket** (verified cross-origin from Vercel) |
 | ngrok tunnel | ✅ | systemd, skip-warning header, **reserved domain** (refract-delicious-nearest.ngrok-free.dev) — permanent URL, survives restarts |
