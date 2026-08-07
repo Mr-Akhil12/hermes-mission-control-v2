@@ -81,9 +81,9 @@ export default function DispatchPage() {
       <div className="card p-5">
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider" style={{ color: "var(--text-faint)" }}>Safety boundary</h2>
         <ul className="space-y-2 text-sm" style={{ color: "var(--text-dim)" }}>
-          <li>• Emails, purchases, deletes, commits → park in <b>Approvals</b></li>
+          <li>• Emails, purchases, deletes, commits → park in <b>Approvals</b> in real time</li>
           <li>• File writes, research, analysis → run immediately</li>
-          <li>• You can edit these rules in Settings (Phase 2)</li>
+          <li>• Approve once, always allow, or deny from the Approvals screen</li>
         </ul>
       </div>
     </div>

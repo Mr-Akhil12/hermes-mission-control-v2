@@ -27,7 +27,39 @@ HERMES = Path(os.path.expanduser("~/.hermes"))
 JOBS = HERMES / "cron" / "jobs.json"
 EXEC = HERMES / "cron" / "executions.db"
 STATE = HERMES / "state.db"
+APPROVALS = HERMES / "approvals.json"
 PORT = int(os.environ.get("STATE_PORT", "8645"))
+
+
+def load_approvals() -> list[dict]:
+    """Load the local approval store (pending + recent history)."""
+    if not APPROVALS.exists():
+        return []
+    try:
+        return json.loads(APPROVALS.read_text())
+    except Exception:
+        return []
+
+
+def save_approval(entry: dict) -> None:
+    """Upsert one approval entry into the local store (keyed by run_id)."""
+    entries = load_approvals()
+    entries = [e for e in entries if e.get("run_id") != entry.get("run_id")]
+    entries.insert(0, entry)
+    # Keep the store bounded (200 entries max).
+    APPROVALS.write_text(json.dumps(entries[:200], indent=1))
+
+
+def _api_headers() -> dict:
+    headers = {"Content-Type": "application/json"}
+    api_key = os.environ.get("API_SERVER_KEY", "")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _api_base() -> str:
+    return os.environ.get("HERMES_API_URL", "http://127.0.0.1:8642")
 
 
 def load_crons() -> list[dict]:
@@ -160,6 +192,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"sessions": load_sessions(limit), "source": "local"})
             elif path == "/api/artifacts":
                 self._json({"artifacts": load_artifacts(), "source": "local"})
+            elif path == "/api/approvals":
+                self._json({"approvals": load_approvals(), "source": "local"})
             elif path == "/api/health":
                 self._json({"ok": True, "time": datetime.now(SAST).isoformat(), "port": PORT})
             else:
@@ -209,13 +243,23 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(e)}, 502)
 
     def do_POST(self):
-        """Proxy chat completions + session endpoints to the local Hermes API
-        (:8642) so one ngrok tunnel serves live state, chat, and streaming."""
+        """Proxy chat completions + session endpoints + run starts to the
+        local Hermes API (:8642) so one ngrok tunnel serves live state, chat,
+        streaming, and approvals."""
         try:
             path = self.path.split("?")[0]
             # Session endpoints: create, chat, chat/stream, fork
             if path.startswith("/api/sessions"):
                 self._proxy_api_stream(path, stream=path.endswith("/chat/stream"))
+                return
+            # Run approval resolution: POST /v1/runs/{run_id}/approval
+            if "/v1/runs/" in path and path.endswith("/approval"):
+                self._proxy_api_stream(path, stream=False)
+                return
+            # Run start: POST /v1/runs — returns run_id; immediately subscribe
+            # to the run's event stream to capture approval.request events.
+            if path == "/v1/runs":
+                self._start_tracked_run()
                 return
             if path not in ("/v1/chat/completions", "/api/chat"):
                 self._json({"error": "not found"}, 404)
@@ -223,6 +267,94 @@ class Handler(BaseHTTPRequestHandler):
             self._proxy_api_stream(path, stream=False)
         except Exception as e:
             self._json({"error": str(e)}, 502)
+
+    def _start_tracked_run(self) -> None:
+        """Start a run via POST /v1/runs, then subscribe to its event stream
+        and record any approval.request into the local store."""
+        import threading
+        import urllib.request as u
+        import urllib.error
+
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length) if length else b"{}"
+
+        api = _api_base()
+        headers = _api_headers()
+        try:
+            req = u.Request(f"{api}/v1/runs", data=body, headers=headers)
+            with u.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+            ctype = resp.headers.get("Content-Type", "application/json")
+            self.send_response(resp.status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self._json({"error": str(e)}, 502)
+            return
+
+        # Parse run_id from the response; if missing, nothing to track.
+        try:
+            run_id = json.loads(data).get("run_id")
+        except Exception:
+            run_id = None
+        if not run_id:
+            return
+
+        def _watch() -> None:
+            """SSE-subscribe to the run and persist approval.request events."""
+            import urllib.request as uu
+            try:
+                req = uu.Request(f"{api}/v1/runs/{run_id}/events", headers=headers)
+                with uu.urlopen(req, timeout=300) as resp:
+                    buf = b""
+                    while True:
+                        chunk = resp.read(2048)
+                        if not chunk:
+                            break
+                        buf += chunk
+                        while b"\n\n" in buf:
+                            frame, buf = buf.split(b"\n\n", 1)
+                            text = frame.decode(errors="replace")
+                            data_line = None
+                            event_line = None
+                            for line in text.split("\n"):
+                                if line.startswith("data:"):
+                                    data_line = line[5:].strip()
+                                elif line.startswith("event:"):
+                                    event_line = line[6:].strip()
+                            if not data_line:
+                                continue
+                            try:
+                                ev = json.loads(data_line)
+                            except Exception:
+                                continue
+                            if ev.get("event") == "approval.request" or event_line == "approval.request":
+                                save_approval({
+                                    "run_id": run_id,
+                                    "status": "pending",
+                                    "command": ev.get("command", ""),
+                                    "what": ev.get("command", ""),
+                                    "why": ev.get("reason", ev.get("detail", "Dangerous command requires approval")),
+                                    "risk": "high" if ev.get("risk") == "high" else "medium",
+                                    "choices": ev.get("choices", ["once", "session", "always", "deny"]),
+                                    "created_at": datetime.now(SAST).isoformat(),
+                                })
+                            elif ev.get("event") in ("run.completed", "run.cancelled", "run.failed"):
+                                # Mark any pending approval for this run resolved.
+                                entries = load_approvals()
+                                for e in entries:
+                                    if e.get("run_id") == run_id and e.get("status") == "pending":
+                                        e["status"] = "resolved"
+                                        e["resolved_at"] = datetime.now(SAST).isoformat()
+                                APPROVALS.write_text(json.dumps(entries[:200], indent=1))
+                                break
+            except Exception as e:
+                print(f"[state-server] run watcher error for {run_id}: {e}", flush=True)
+
+        threading.Thread(target=_watch, daemon=True).start()
 
     def _proxy_api_stream(self, path: str, stream: bool = False) -> None:
         """Forward a request to the Hermes API (:8642).

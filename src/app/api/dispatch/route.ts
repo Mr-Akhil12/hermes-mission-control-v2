@@ -7,25 +7,21 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "prompt is required" }, { status: 400 });
     }
 
-    // Local Hermes dispatch via the API server (:8642). Phase 2 swaps this to
-    // the Turso queue + bridge so the task survives tunnel drops.
     const apiBase = process.env.HERMES_API_URL ?? "http://127.0.0.1:8642";
-    // On Vercel (phone), route chat through the tunneled state server proxy
     const DATA_URL = process.env.NEXT_PUBLIC_DATA_URL ?? "";
-    const proxyBase = DATA_URL && !apiBase.startsWith("http://127.0.0.1") && apiBase === "http://127.0.0.1:8642"
-      ? DATA_URL
-      : apiBase;
-    const model = process.env.HERMES_API_MODEL ?? undefined;
-    const body: Record<string, unknown> = {
-      model: model ?? "deepseek-v4-flash:0731",
-      messages: [{ role: "user", content: `[dispatch:${profile}] ${prompt}` }],
-      stream: false,
+    const proxyBase = DATA_URL && apiBase.startsWith("http://127.0.0.1") ? DATA_URL : apiBase;
+
+    // Start a real API run. Dangerous commands in the run park in
+    // `waiting_for_approval` — surfaced on the Approvals screen.
+    const body = {
+      input: `[dispatch:${profile}] ${prompt}`,
+      model: process.env.HERMES_API_MODEL ?? "deepseek-v4-flash:0731",
     };
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 90000);
+    const timer = setTimeout(() => controller.abort(), 30000);
 
-    const res = await fetch(`${proxyBase}/v1/chat/completions`, {
+    const res = await fetch(`${proxyBase}/v1/runs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -39,13 +35,16 @@ export async function POST(request: Request) {
     }
 
     const data = await res.json();
-    const message = data?.choices?.[0]?.message?.content ?? "(no response)";
-    return NextResponse.json({ ok: true, message });
+    return NextResponse.json({
+      ok: true,
+      message: data.run_id ? `Run started (${data.run_id}). If it needs approval, it'll appear on the Approvals screen.` : "Run started.",
+      run_id: data.run_id ?? null,
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     const isAbort = msg.includes("abort") || msg.includes("Abort");
     return NextResponse.json(
-      { error: isAbort ? "Hermes API timed out (90s)" : `Dispatch failed: ${msg}` },
+      { error: isAbort ? "Hermes API timed out (30s)" : `Dispatch failed: ${msg}` },
       { status: 502 }
     );
   }
