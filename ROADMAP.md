@@ -46,7 +46,7 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 | Piece | Status | Notes |
 |---|---|---|
 | Turso data layer | ✅ | tasks/sync_cache/briefs/artifacts tables |
-| Bridge (mirror → Turso) | ✅ | **systemd `hermes-os-bridge.service`** (enabled, control-group kill, TERM trap — no dup loops on restart) |
+| Bridge (mirror → Turso) | ✅ | **systemd user unit `hermes-os-bridge.service`** (enabled, control-group kill, TERM trap). **Pitfall fixed:** a duplicate SYSTEM-level unit (`/etc/systemd/system/hermes-os-bridge.service`) was respawning orphan wrappers — removed; only the user unit runs |
 | State server (:8645) | ✅ | systemd, serves crons/runs/sessions/artifacts + chat proxy |
 | Tailscale funnel | ✅ | Permanent HTTPS → :9119; **does WebSocket** (verified cross-origin from Vercel) |
 | ngrok tunnel | ✅ | systemd, skip-warning header, **reserved domain** (refract-delicious-nearest.ngrok-free.dev) — permanent URL, survives restarts |
