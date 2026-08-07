@@ -120,7 +120,7 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 - [x] Deploy to Vercel + auto-deploy on push
 
 ### Phase 2 — Personal sections + real data everywhere (in progress)
-- [ ] **Turso token-expiry watchdog** — cron alerts before bridge dies (token ~7 days)
+- [x] **Turso token-expiry watchdog** — **REPLACED with never-expiring tokens** (7 Aug): minted `--expiration never` tokens for dashboard + budget app, updated secrets.md + Vercel envs + Bitwarden. No watchdog needed — tokens never expire.
 - [ ] **Approvals real** — wire to Hermes approval mechanism, safety rules panel
 - [ ] **Content Studio** — Turso `content_pipeline` kanban, viral scores, calendar
 - [ ] **Trading** — Turso `trades`/`strategy` read, P&L chart, risk meter
