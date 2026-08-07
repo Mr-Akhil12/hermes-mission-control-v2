@@ -34,12 +34,12 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 | Agents (/agents) | ⬜ | — | Stub, Phase 3 (React Flow graph) |
 | Sessions (/sessions) | ✅ | state.db | Real transcripts, stop reasons |
 | Channels (/channels) | 🟡 | Demo | Composer works, status is demo |
-| Chat + Voice (/chat) | ✅ | :8642 via proxy | Streaming, mic, TTS Jarvis mode |
+| Chat + Voice (/chat) | ✅ | ngrok tunnel → :8645 → :8642 | Streaming, mic, TTS Jarvis — chat verified live 7 Aug |
 | Content Studio (/studio) | ⬜ | — | Stub, Phase 2 (content_pipeline) |
 | Trading (/trading) | ⬜ | — | Stub, Phase 2 (trades/strategy) |
 | Development (/dev) | ✅ | GitHub + artifacts | Artifact search real |
 | Personal (/personal) | ⬜ | — | Stub, Phase 2 (memory + vault) |
-| Native UI (/native) | ✅ | :9119 via HTTPS proxy | Mixed-content fixed |
+| Native UI (/native) | ✅ | /native-proxy same-origin + WS via funnel | Full embed: login, dashboard, live WS — verified 7 Aug |
 | Settings (/settings) | ✅ | — | Data source status, lock now |
 
 ### Infrastructure
@@ -47,8 +47,9 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 |---|---|---|
 | Turso data layer | ✅ | tasks/sync_cache/briefs/artifacts tables |
 | Bridge (mirror → Turso) | ✅ | systemd, 30s loop, survives reboots |
-| State server (:8645) | ✅ | systemd, serves crons/runs/sessions/artifacts |
-| ngrok tunnel | ✅ | systemd, skip-browser-warning header |
+| State server (:8645) | ✅ | systemd, serves crons/runs/sessions/artifacts + chat proxy |
+| Tailscale funnel | ✅ | Permanent HTTPS → :9119; **does WebSocket** (verified cross-origin from Vercel) |
+| ngrok tunnel | ✅ | systemd, skip-warning header, **reserved domain** (refract-delicious-nearest.ngrok-free.dev) — permanent URL, survives restarts |
 | Vercel deploy | ✅ | Auto-deploy on push |
 | Artifact pipeline | ✅ | hyperframes (public) + hermes-dump (private) |
 | Hourly cron report | ✅ | Job 7a579ab29e93 |
@@ -65,6 +66,9 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 | 4 | Thinking viewer never shows | `setThinkingFor(null)` in `finally` wiped state before render | Only null on error | ✅ |
 | 5 | Native embed blank in iframe | Mixed content: HTTP iframe inside HTTPS page silently blocked | HTTPS proxy via state server `/native/*` | ✅ |
 | 13 | Native embed white on mobile | Third-party cookie block: SameSite=Lax session cookies dropped in cross-origin iframe | Same-origin proxy `/native-proxy/*` (server-side fetch + path rewrite + first-party cookies) | ✅ |
+| 14 | Chat 502 "Hermes API failed" | Dead condition in route: `DATA_URL && !apiBase.startsWith(...) && apiBase === "127.0.0.1:8642"` — impossible, always fell back to localhost on Vercel | Fixed condition: `DATA_URL && apiBase.startsWith("127.0.0.1") ? DATA_URL : apiBase` (commit 56a1a7e) | ✅ |
+| 15 | `NEXT_PUBLIC_DATA_URL` empty in Vercel prod | Env var existed but value was `""` — chat had nothing to route through even after fix | Set to permanent ngrok URL, redeployed — chat verified "OK — I can hear you" | ✅ |
+| 16 | Embed live features (events/WS) dead | SPA builds WS URL from `window.location.host` = Vercel origin (no WS on serverless) | Proxy rewrites host to funnel `akhils-pc.tail6d629e.ts.net` — WS verified cross-origin (gateway.ready received) | ✅ |
 | 6 | Turso 400 Bad Request | v2 API needs `requests` not `statements` + typed args | Rewrote client with `_typed_args` | ✅ |
 | 7 | Production still "remote" not "turso" | `TURSO_URL` set to `libsql://` scheme, fetch needs `https://` | Fixed env var | ✅ |
 | 8 | ngrok browser warning interstitial | Free-tier interstitial page | `--request-header-add ngrok-skip-browser-warning: true` | ✅ |
