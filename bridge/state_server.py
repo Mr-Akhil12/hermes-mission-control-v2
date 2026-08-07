@@ -140,6 +140,12 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/native/"):
                 self._proxy_native(path)
                 return
+            # Session sub-endpoints (messages, chat) come from the Hermes API
+            # so the chat page gets real persisted conversation history.
+            # Exact /api/sessions stays local (existing Sessions page shape).
+            if path.startswith("/api/sessions/") and path != "/api/sessions":
+                self._proxy_api_get(path)
+                return
             if path == "/api/crons":
                 self._json({"jobs": load_crons(), "source": "local"})
             elif path == "/api/runs":
@@ -161,6 +167,28 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._json({"error": str(e)}, 500)
 
+    def _proxy_api_get(self, path: str) -> None:
+        """Forward a GET to the Hermes API (:8642) — session list/messages."""
+        import urllib.request as u
+        api = os.environ.get("HERMES_API_URL", "http://127.0.0.1:8642")
+        api_key = os.environ.get("API_SERVER_KEY", "")
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        req = u.Request(f"{api}{self.path}", headers=headers)
+        try:
+            with u.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+                ctype = resp.headers.get("Content-Type", "application/json")
+            self.send_response(resp.status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self._json({"error": str(e)}, 502)
+
     def _proxy_native(self, path: str) -> None:
         """Proxy a request to the native Hermes dashboard (:9119)."""
         import urllib.request as u
@@ -181,33 +209,58 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(e)}, 502)
 
     def do_POST(self):
-        """Proxy chat completions to the local Hermes API (:8642) so one
-        ngrok tunnel serves both live state and chat on the phone."""
+        """Proxy chat completions + session endpoints to the local Hermes API
+        (:8642) so one ngrok tunnel serves live state, chat, and streaming."""
         try:
             path = self.path.split("?")[0]
+            # Session endpoints: create, chat, chat/stream, fork
+            if path.startswith("/api/sessions"):
+                self._proxy_api_stream(path, stream=path.endswith("/chat/stream"))
+                return
             if path not in ("/v1/chat/completions", "/api/chat"):
                 self._json({"error": "not found"}, 404)
                 return
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length) if length else b"{}"
-
-            api = os.environ.get("HERMES_API_URL", "http://127.0.0.1:8642")
-            api_key = os.environ.get("API_SERVER_KEY", "")
-            import urllib.request as u
-            headers = {"Content-Type": "application/json"}
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
-            req = u.Request(f"{api}/v1/chat/completions", data=body, headers=headers)
-            with u.urlopen(req, timeout=120) as resp:
-                data = resp.read()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(data)
+            self._proxy_api_stream(path, stream=False)
         except Exception as e:
             self._json({"error": str(e)}, 502)
+
+    def _proxy_api_stream(self, path: str, stream: bool = False) -> None:
+        """Forward a request to the Hermes API (:8642).
+
+        When ``stream`` is True (SSE chat), write chunks as they arrive so the
+        client sees tokens/thinking in real time instead of one buffered blob.
+        """
+        import urllib.request as u
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length) if length else b"{}"
+
+        api = os.environ.get("HERMES_API_URL", "http://127.0.0.1:8642")
+        api_key = os.environ.get("API_SERVER_KEY", "")
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        req = u.Request(f"{api}{path}", data=body, headers=headers)
+        with u.urlopen(req, timeout=300) as resp:
+            ctype = resp.headers.get("Content-Type", "application/json")
+            self.send_response(resp.status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-cache")
+            if stream:
+                # SSE: no Content-Length, chunked transfer
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+                while True:
+                    chunk = resp.read(4096)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            else:
+                data = resp.read()
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
 
     def log_message(self, format: str, *args):
         sys.stderr.write(f"[state-server {datetime.now(SAST).isoformat()}] {format % args}\n")
