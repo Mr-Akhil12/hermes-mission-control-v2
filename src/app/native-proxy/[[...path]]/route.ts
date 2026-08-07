@@ -6,6 +6,7 @@ import { NextRequest, NextResponse } from "next/server";
 // (/assets, /api, /auth, /fonts) to stay inside /native-proxy so cookies
 // become first-party and the SPA's hardcoded basename "/" still works.
 const FUNNEL = process.env.NEXT_PUBLIC_FUNNEL_URL ?? "https://akhils-pc.tail6d629e.ts.net";
+const FUNNEL_HOST = FUNNEL.replace(/^https?:\/\//, "");
 const PREFIX = "/native-proxy";
 
 // Paths that must be rewritten inside HTML/JS so the SPA stays same-origin.
@@ -78,6 +79,13 @@ export async function handler(
       // The SPA hardcodes router basename "/" — point it at the proxy prefix so
       // client-side navigation and full reloads both stay inside /native-proxy.
       out = out.replace(/basename:e=`\/`/g, `basename:e='${PREFIX}'`);
+      // WebSocket: the SPA builds its WS URL from window.location.host, which
+      // inside the iframe is the Vercel origin (no WS support). Point it at the
+      // funnel host — verified to accept cross-origin WS from the Vercel origin.
+      out = out.replace(
+        /{host:window\.location\.host,protocol:window\.location\.protocol}/g,
+        `{host:'${FUNNEL_HOST}',protocol:'https:'}`
+      );
       respHeaders.set("content-type", ctype);
       return new NextResponse(out, { status: resp.status, headers: respHeaders });
     }
