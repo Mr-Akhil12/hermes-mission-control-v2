@@ -64,7 +64,15 @@ def get_vapid() -> dict:
 
 
 def public_vapid() -> str:
-    return get_vapid()["public_key"]
+    """Return the VAPID public key as a base64url string (no PEM wrapper).
+
+    Browsers need the raw base64url key for pushManager.subscribe() — the
+    PEM header/footer and newlines break atob() on the client.
+    """
+    pem = get_vapid()["public_key"]
+    b64 = "".join(line for line in pem.splitlines() if "-----" not in line)
+    # Standard base64 -> base64url, strip padding.
+    return b64.replace("+", "-").replace("/", "_").rstrip("=")
 
 
 def subscribe(sub: dict) -> int:
