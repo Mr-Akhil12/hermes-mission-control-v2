@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, CheckCircle2, ArrowRight, Send } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ArrowRight, Send, NotebookPen, CalendarDays, Activity } from "lucide-react";
 
 type CronJob = {
   job_id?: string;
@@ -15,36 +15,50 @@ type CronJob = {
   state: string;
 };
 
-type Run = {
-  job_id: string;
-  status: string;
-  claimed_at: string;
-  finished_at: string | null;
-  error: string | null;
+type Brief = {
+  id: string;
+  date: string;
+  content: {
+    attention: { type: string; name?: string; id?: string }[];
+    shipped: unknown[];
+    next_actions: unknown[];
+    one_thing: string | null;
+  };
+  created_at: string;
 };
 
 export default function Home() {
   const [crons, setCrons] = useState<CronJob[]>([]);
-  const [runs, setRuns] = useState<Run[]>([]);
+  const [briefs, setBriefs] = useState<Brief[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    Promise.all([fetch("/api/crons").then((r) => r.json()), fetch("/api/runs").then((r) => r.json())])
-      .then(([c, r]) => {
+    Promise.all([
+      fetch("/api/crons").then((r) => r.json()),
+      fetch("/api/briefs").then((r) => r.json()),
+    ])
+      .then(([c, b]) => {
         setCrons(c.jobs ?? []);
-        setRuns(r.runs ?? []);
+        setBriefs(b.briefs ?? []);
       })
       .catch((e) => setLoadError(String(e)));
   }, []);
 
   const cronId = (c: CronJob) => c.job_id ?? c.id ?? "unknown";
-  const failedIds = new Set(runs.filter((r) => r.status === "failed").map((r) => r.job_id));
-  const failed = crons.filter((c) => failedIds.has(cronId(c)));
-  const healthy = crons.filter((c) => c.last_status === "ok" && !failedIds.has(cronId(c)));
+
+  // REAL failure signal: last_status === "error" from jobs.json (verified:
+  // executions.db uses completed/running — not failed — so run-status counts
+  // always read 0 failures. last_status is the true source.)
+  const failed = crons.filter((c) => c.last_status === "error");
+  const healthy = crons.filter((c) => c.last_status === "ok");
+  const quiet = crons.filter((c) => c.last_status !== "error" && c.last_status !== "ok");
 
   const now = new Date();
   const dateStr = now.toLocaleDateString("en-ZA", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
   const timeStr = now.toLocaleTimeString("en-ZA", { hour: "2-digit", minute: "2-digit", timeZone: "Africa/Johannesburg" });
+
+  const today = now.toISOString().slice(0, 10);
+  const todayBrief = briefs.find((b) => b.date === today) ?? briefs[0];
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
@@ -67,6 +81,28 @@ export default function Home() {
         </div>
       )}
 
+      {/* One thing — from the daily brief */}
+      {todayBrief?.content?.one_thing && (
+        <section className="card p-5" style={{ borderColor: "color-mix(in srgb, var(--amber) 35%, transparent)" }}>
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--amber)" }}>
+            <Activity className="h-4 w-4" /> One thing · {todayBrief.date}
+          </div>
+          <div className="mt-1.5 text-lg font-bold">{todayBrief.content.one_thing}</div>
+          {todayBrief.content.attention.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-2">
+              {todayBrief.content.attention.slice(0, 6).map((a, i) => (
+                <span key={i} className="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase" style={{ background: "color-mix(in srgb, var(--red) 12%, transparent)", color: "var(--red)" }}>
+                  {a.type.replace(/_/g, " ")} {a.name ? `· ${a.name}` : ""}
+                </span>
+              ))}
+            </div>
+          )}
+          <Link href="/crons" className="mt-3 inline-flex items-center gap-1 text-xs font-semibold" style={{ color: "var(--accent)" }}>
+            Investigate <ArrowRight className="h-3 w-3" />
+          </Link>
+        </section>
+      )}
+
       {/* Attention queue */}
       <section>
         <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-wider" style={{ color: "var(--text-faint)" }}>
@@ -75,11 +111,11 @@ export default function Home() {
         {failed.length === 0 ? (
           <div className="card flex items-center gap-3 p-4">
             <CheckCircle2 className="h-5 w-5" style={{ color: "var(--green)" }} />
-            <span className="text-sm" style={{ color: "var(--text-dim)" }}>No failed crons in the last 24h.</span>
+            <span className="text-sm" style={{ color: "var(--text-dim)" }}>No failed crons right now.</span>
           </div>
         ) : (
           <div className="grid gap-3 md:grid-cols-2">
-            {failed.map((c) => (
+            {failed.slice(0, 6).map((c) => (
               <div key={cronId(c)} className="card card-hover p-4" style={{ borderColor: "color-mix(in srgb, var(--red) 40%, transparent)" }}>
                 <div className="flex items-start justify-between gap-2">
                   <div>
@@ -101,7 +137,7 @@ export default function Home() {
         )}
       </section>
 
-      {/* Shipped / status summary */}
+      {/* Real system status — counts from jobs.json last_status */}
       <section>
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider" style={{ color: "var(--text-faint)" }}>
           System status
@@ -117,14 +153,37 @@ export default function Home() {
           </div>
           <div className="card p-4">
             <div className="text-2xl font-bold" style={{ color: "var(--red)" }}>{failed.length}</div>
-            <div className="text-xs" style={{ color: "var(--text-faint)" }}>Failed (24h)</div>
+            <div className="text-xs" style={{ color: "var(--text-faint)" }}>Failed</div>
           </div>
           <div className="card p-4">
-            <div className="text-2xl font-bold" style={{ color: "var(--amber)" }}>{runs.length}</div>
-            <div className="text-xs" style={{ color: "var(--text-faint)" }}>Runs tracked</div>
+            <div className="text-2xl font-bold" style={{ color: "var(--amber)" }}>{quiet.length}</div>
+            <div className="text-xs" style={{ color: "var(--text-faint)" }}>Quiet/other</div>
           </div>
         </div>
       </section>
+
+      {/* Brief history */}
+      {briefs.length > 0 && (
+        <section className="card p-5">
+          <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-wider" style={{ color: "var(--text-faint)" }}>
+            <CalendarDays className="h-4 w-4" /> Daily brief history
+          </h2>
+          <ul className="space-y-2">
+            {briefs.map((b) => (
+              <li key={b.id} className="flex items-start gap-2 text-sm">
+                <NotebookPen className="mt-0.5 h-3.5 w-3.5 shrink-0" style={{ color: "var(--accent-2)" }} />
+                <div className="min-w-0 flex-1">
+                  <span className="font-semibold">{b.date}</span>
+                  {b.content?.one_thing && <span style={{ color: "var(--text-dim)" }}> — {b.content.one_thing}</span>}
+                </div>
+                <span className="shrink-0 text-[10px]" style={{ color: "var(--text-faint)" }}>
+                  {b.content?.attention?.length ?? 0} attention
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {/* Dispatch CTA */}
       <section className="card flex flex-col items-start gap-4 p-6 sm:flex-row sm:items-center sm:justify-between">
