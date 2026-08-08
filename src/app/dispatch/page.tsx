@@ -1,13 +1,42 @@
 "use client";
 
-import { useState } from "react";
-import { Send, Loader2, CheckCircle2, XCircle } from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
+import { Send, Loader2, CheckCircle2, XCircle, ListChecks, Clock, AlertTriangle } from "lucide-react";
+
+type Task = {
+  id: string;
+  prompt: string;
+  profile: string;
+  status: "queued" | "running" | "done" | "failed" | "cancelled";
+  result: string | null;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
 
 export default function DispatchPage() {
   const [prompt, setPrompt] = useState("");
   const [profile, setProfile] = useState("default");
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [tasks, setTasks] = useState<Task[]>([]);
+
+  const loadQueue = useCallback(async () => {
+    try {
+      const res = await fetch("/api/dispatch/queue", { cache: "no-store" });
+      const data = await res.json();
+      setTasks(data?.tasks ?? []);
+    } catch {
+      // queue read failure is non-fatal
+    }
+  }, []);
+
+  useEffect(() => {
+    loadQueue();
+    const t = setInterval(loadQueue, 15000);
+    return () => clearInterval(t);
+  }, [loadQueue]);
 
   const dispatch = async () => {
     if (!prompt.trim()) return;
@@ -22,6 +51,7 @@ export default function DispatchPage() {
       const data = await res.json();
       setResult({ ok: res.ok, message: data.message ?? data.error ?? "Dispatched." });
       if (res.ok) setPrompt("");
+      loadQueue();
     } catch (e) {
       setResult({ ok: false, message: String(e) });
     } finally {
@@ -29,11 +59,28 @@ export default function DispatchPage() {
     }
   };
 
+  const statusStyle = (s: Task["status"]) => {
+    switch (s) {
+      case "done": return { color: "var(--green)" };
+      case "failed": return { color: "var(--red)" };
+      case "running": return { color: "var(--accent)" };
+      default: return { color: "var(--amber)" };
+    }
+  };
+  const statusIcon = (s: Task["status"]) => {
+    switch (s) {
+      case "done": return <CheckCircle2 className="h-3.5 w-3.5" />;
+      case "failed": return <XCircle className="h-3.5 w-3.5" />;
+      case "running": return <Loader2 className="h-3.5 w-3.5 animate-spin" />;
+      default: return <Clock className="h-3.5 w-3.5" />;
+    }
+  };
+
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       <div>
         <h1 className="text-2xl font-bold">Dispatch</h1>
-        <p className="text-sm" style={{ color: "var(--text-dim)" }}>Send work to Hermes. Safe tasks run; consequential actions park for approval.</p>
+        <p className="text-sm" style={{ color: "var(--text-dim)" }}>Send work to Hermes. Safe tasks run; consequential actions park for approval. If Hermes is unreachable, tasks queue and run when it's back.</p>
       </div>
 
       <div className="card p-5">
@@ -78,12 +125,44 @@ export default function DispatchPage() {
         )}
       </div>
 
+      {tasks.length > 0 && (
+        <div className="card p-5">
+          <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-wider" style={{ color: "var(--text-faint)" }}>
+            <ListChecks className="h-4 w-4" /> Task queue ({tasks.length})
+          </h2>
+          <ul className="space-y-2">
+            {tasks.slice(0, 10).map((t) => (
+              <li key={t.id} className="rounded-lg border px-3 py-2" style={{ borderColor: "var(--card-border)" }}>
+                <div className="flex items-start gap-2">
+                  <span className="mt-0.5 shrink-0" style={statusStyle(t.status)}>{statusIcon(t.status)}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm">{t.prompt}</div>
+                    <div className="text-[10px]" style={{ color: "var(--text-faint)" }}>
+                      {t.profile} · {t.status} · {t.created_at ? new Date(t.created_at).toLocaleString("en-ZA", { timeZone: "Africa/Johannesburg" }) : ""}
+                    </div>
+                    {t.error && (
+                      <div className="mt-1 flex items-start gap-1 text-[11px]" style={{ color: "var(--red)" }}>
+                        <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" /> {t.error}
+                      </div>
+                    )}
+                    {t.result && (
+                      <div className="mt-1 line-clamp-2 text-[11px]" style={{ color: "var(--text-dim)" }}>{t.result}</div>
+                    )}
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <div className="card p-5">
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider" style={{ color: "var(--text-faint)" }}>Safety boundary</h2>
         <ul className="space-y-2 text-sm" style={{ color: "var(--text-dim)" }}>
           <li>• Emails, purchases, deletes, commits → park in <b>Approvals</b> in real time</li>
           <li>• File writes, research, analysis → run immediately</li>
           <li>• Approve once, always allow, or deny from the Approvals screen</li>
+          <li>• Tunnel down? Tasks queue in Turso and run when the bridge reconnects</li>
         </ul>
       </div>
     </div>
