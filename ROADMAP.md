@@ -40,7 +40,7 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 | Development (/dev) | ✅ | GitHub + artifacts | Artifact search real |
 | Personal (/personal) | ⬜ | — | Stub, Phase 2 (memory + vault) |
 | Native UI (/native) | ✅ | /native-proxy same-origin + WS via funnel | Full embed: login, dashboard, live WS — verified 7 Aug |
-| Settings (/settings) | ✅ | — | Data source status, lock now |
+| Settings (/settings) | ✅ | — | Data source status, lock now, **push notifications enable/disable/test** |
 
 ### Infrastructure
 | Piece | Status | Notes |
@@ -133,7 +133,7 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 ### Phase 3 — Agents + polish (next)
 - [ ] **Agents live graph** — React Flow, subagent spawns, activity feed
 - [ ] **Subagent chat** — dispatch to SOL/LUNA/DEEPSEEK profiles
-- [ ] **Push notifications** — approvals/failed crons to phone
+- [x] **Push notifications** — Web Push (VAPID + SW), approvals + failed crons ping phone, Settings enable/disable/test — verified 8 Aug
 - [ ] **Open-source release** — redaction pass, docs, MIT
 - [ ] **PWA offline polish** — install prompts, offline shell
 - [ ] **Performance pass** — bundle size, image optimization, lazy routes

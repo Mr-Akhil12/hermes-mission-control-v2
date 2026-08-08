@@ -1,12 +1,8 @@
 // Hermes OS v2 — Push subscription client
 // Registers the service worker, subscribes to Web Push, and syncs the
-// subscription with the local state server (via the Vercel proxy).
-
-const DATA_URL = process.env.NEXT_PUBLIC_DATA_URL ?? "";
-
-function apiBase() {
-  return DATA_URL || "http://127.0.0.1:8645";
-}
+// subscription through the same-origin Vercel routes (/api/push/*), which
+// proxy to the local state server via the ngrok tunnel. Same-origin keeps
+// the phone on Vercel's CDN — no fragile direct browser→ngrok hop.
 
 export async function isPushSupported(): Promise<boolean> {
   return typeof window !== "undefined" && "serviceWorker" in navigator && "PushManager" in window;
@@ -14,7 +10,7 @@ export async function isPushSupported(): Promise<boolean> {
 
 export async function getPushStatus(): Promise<{ enabled: boolean; subscriptions: number }> {
   try {
-    const res = await fetch(`${apiBase()}/api/push/status`, { cache: "no-store" });
+    const res = await fetch("/api/push", { cache: "no-store" });
     const data = await res.json();
     return { enabled: Boolean(data?.enabled), subscriptions: Number(data?.subscriptions ?? 0) };
   } catch {
@@ -24,7 +20,7 @@ export async function getPushStatus(): Promise<{ enabled: boolean; subscriptions
 
 export async function getVapidKey(): Promise<string | null> {
   try {
-    const res = await fetch(`${apiBase()}/api/push/vapid`, { cache: "no-store" });
+    const res = await fetch("/api/push/vapid", { cache: "no-store" });
     const data = await res.json();
     return data?.public_key ?? null;
   } catch {
@@ -48,7 +44,7 @@ export async function enablePush(): Promise<{ ok: boolean; error?: string }> {
       applicationServerKey: urlBase64ToUint8Array(vapid),
     });
 
-    const res = await fetch(`${apiBase()}/api/push/subscribe`, {
+    const res = await fetch("/api/push", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(sub.toJSON()),
@@ -69,7 +65,7 @@ export async function disablePush(): Promise<{ ok: boolean; error?: string }> {
     const sub = await reg.pushManager.getSubscription();
     if (sub) {
       // Tell the state server to drop it first (so it stops sending).
-      await fetch(`${apiBase()}/api/push/unsubscribe`, {
+      await fetch("/api/push/unsubscribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ endpoint: sub.endpoint }),
@@ -84,7 +80,7 @@ export async function disablePush(): Promise<{ ok: boolean; error?: string }> {
 
 export async function testPush(): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(`${apiBase()}/api/push/test`, { method: "POST" });
+    const res = await fetch("/api/push/test", { method: "POST" });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       return { ok: false, error: data?.error ?? `Test failed (${res.status})` };
