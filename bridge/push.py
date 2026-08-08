@@ -42,24 +42,43 @@ def _save_subs(subs: list[dict]) -> None:
 
 
 def get_vapid() -> dict:
-    """Return {public_key, private_key} — generating + persisting on first use."""
+    """Return {public_key, private_key} — generating + persisting on first use.
+
+    Keys are generated with pywebpush's Vapid01 so the private key is SEC1
+    format (BEGIN EC PRIVATE KEY) — pywebpush cannot deserialize PKCS8
+    (BEGIN PRIVATE KEY) and fails with 'ASN.1 parsing error: invalid length'.
+    """
     if VAPID_FILE.exists():
         try:
-            return json.loads(VAPID_FILE.read_text())
+            keys = json.loads(VAPID_FILE.read_text())
+            # Migrate a PKCS8 private key (old format) to SEC1 so pywebpush
+            # can use it — otherwise every send fails to deserialize.
+            if "BEGIN PRIVATE KEY" in keys.get("private_key", ""):
+                from cryptography.hazmat.primitives import serialization
+
+                k = serialization.load_pem_private_key(keys["private_key"].encode(), password=None)
+                keys["private_key"] = k.private_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PrivateFormat.TraditionalOpenSSL,
+                    serialization.NoEncryption(),
+                ).decode()
+                VAPID_FILE.write_text(json.dumps(keys, indent=1))
+            return keys
         except Exception:
             pass
     v = Vapid01()
     v.generate_keys()
-    priv = v.private_key.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption(),
-    ).decode()
-    pub = v.public_key.public_bytes(
-        serialization.Encoding.PEM,
-        serialization.PublicFormat.SubjectPublicKeyInfo,
-    ).decode()
-    keys = {"public_key": pub, "private_key": priv}
+    keys = {
+        "public_key": v.public_key.public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        ).decode(),
+        "private_key": v.private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        ).decode(),
+    }
     VAPID_FILE.write_text(json.dumps(keys, indent=1))
     return keys
 
@@ -106,6 +125,13 @@ def send_notification(title: str, body: str, url: str = "/approvals", tag: str =
     if not subs:
         return {"sent": 0, "failed": 0, "note": "no subscriptions"}
     vapid = get_vapid()
+    # Pass a Vapid01 INSTANCE, not the PEM string. webpush()'s from_string()
+    # keeps the PEM header/footer when stripping newlines, then base64url-
+    # decodes garbage → "ASN.1 parsing error: invalid length". An instance
+    # bypasses that path entirely (isinstance check in webpush()).
+    from py_vapid import Vapid01
+
+    vapid_obj = Vapid01.from_pem(vapid["private_key"].encode("utf8"))
     payload = json.dumps({"title": title, "body": body, "url": url, "tag": tag})
     sent, failed = 0, 0
     keep = []
@@ -114,7 +140,7 @@ def send_notification(title: str, body: str, url: str = "/approvals", tag: str =
             webpush(
                 subscription_info=sub,
                 data=payload,
-                vapid_private_key=vapid["private_key"],
+                vapid_private_key=vapid_obj,
                 vapid_claims={"sub": "mailto:akhilpillay2.0@gmail.com"},
                 ttl=300,
             )
