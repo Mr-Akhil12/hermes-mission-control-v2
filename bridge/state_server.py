@@ -31,6 +31,7 @@ JOBS = HERMES / "cron" / "jobs.json"
 EXEC = HERMES / "cron" / "executions.db"
 STATE = HERMES / "state.db"
 APPROVALS = HERMES / "approvals.json"
+VAULT_CONTENT = Path("/mnt/c/Users/pilla/Vault/second-brain/Content")
 PORT = int(os.environ.get("STATE_PORT", "8645"))
 
 
@@ -157,6 +158,134 @@ def load_artifacts() -> list[dict]:
     return artifacts[:200]
 
 
+def _parse_frontmatter(text: str) -> tuple[dict, str]:
+    """Parse YAML-ish frontmatter (--- delimited) from a markdown file.
+
+    Returns (meta, body). Meta values are strings; lists are joined with
+    commas. Falls back to {} if no frontmatter.
+    """
+    if not text.startswith("---"):
+        return {}, text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {}, text
+    fm = text[3:end].strip()
+    body = text[end + 4 :]
+    meta: dict[str, str] = {}
+    for line in fm.splitlines():
+        if ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        key = key.strip()
+        val = val.strip()
+        if val.startswith("[") and val.endswith("]"):
+            val = ", ".join(v.strip() for v in val[1:-1].split(",") if v.strip())
+        meta[key] = val
+    return meta, body
+
+
+def load_content() -> list[dict]:
+    """List vault Content/ files as studio cards (kanban + calendar)."""
+    if not VAULT_CONTENT.exists():
+        return []
+    cards = []
+    for p in sorted(VAULT_CONTENT.glob("*.md"), reverse=True):
+        if p.name == "Content Calendar.md":
+            continue
+        # Only real content pieces: YYYY-MM-DD - ... filename taxonomy.
+        # Skip planning/calendar files and anything without a date prefix.
+        name = p.stem
+        if len(name) < 10 or name[4] != "-" or name[7] != "-":
+            continue
+        # Skip trading-pipeline artifacts (TWP/Trading/Trade Journal) — those
+        # live in the Trading screen, not the content studio.
+        lower = name.lower()
+        if any(skip in lower for skip in ("twp ", "trading plan", "trade journal", "twp-", "twp_")):
+            continue
+        try:
+            text = p.read_text(errors="replace")
+        except Exception:
+            continue
+        meta, _ = _parse_frontmatter(text)
+        date = meta.get("date", name[:10])
+        platform = meta.get("platform", "")
+        # Infer platform from filename when frontmatter is missing
+        if not platform:
+            parts = name.split(" - ", 2)
+            if len(parts) > 1:
+                platform = parts[1]
+        # Normalize platform names to a canonical set
+        pl = platform.lower()
+        if "linkedin" in pl:
+            platform = "linkedin"
+        elif "youtube" in pl:
+            platform = "youtube"
+        elif "x" in pl or "twitter" in pl:
+            platform = "x"
+        elif "tiktok" in pl:
+            platform = "tiktok"
+        elif "blog" in pl:
+            platform = "blog"
+        title = meta.get("title", "")
+        if not title:
+            parts = name.split(" - ", 2)
+            title = parts[-1] if len(parts) > 1 else name
+        status = meta.get("status", "idea")
+        # Normalize status to the kanban set
+        status_map = {
+            "drafted": "drafted",
+            "ready": "approved",
+            "approved": "approved",
+            "scheduled": "scheduled",
+            "posted": "posted",
+            "published": "posted",
+            "rejected": "rejected",
+            "idea": "idea",
+        }
+        status = status_map.get(status.lower(), "idea")
+        cards.append(
+            {
+                "id": p.name,
+                "file": p.name,
+                "date": date,
+                "platform": platform,
+                "title": title,
+                "status": status,
+                "tags": meta.get("tags", ""),
+                "viral_score": meta.get("viral_score", ""),
+                "scheduled_for": meta.get("scheduled_for", ""),
+                "posted_at": meta.get("posted_at", ""),
+                "path": str(p),
+            }
+        )
+    return cards
+
+
+def update_content_status(file: str, status: str) -> dict:
+    """Rewrite the status: line in a vault file's frontmatter."""
+    if not file or "/" in file or "\\" in file:
+        return {"error": "invalid filename"}
+    p = VAULT_CONTENT / file
+    if not p.exists():
+        return {"error": "file not found"}
+    text = p.read_text(errors="replace")
+    if not text.startswith("---"):
+        return {"error": "no frontmatter"}
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {"error": "no frontmatter"}
+    fm = text[3:end]
+    body = text[end + 4 :]
+    if "status:" in fm:
+        import re
+
+        fm = re.sub(r"(?m)^status:.*$", f"status: {status}", fm)
+    else:
+        fm = fm.rstrip() + f"\nstatus: {status}"
+    p.write_text(f"---{fm}---{body}")
+    return {"ok": True, "file": file, "status": status}
+
+
 class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, status=200):
         body = json.dumps(obj).encode()
@@ -195,6 +324,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"sessions": load_sessions(limit), "source": "local"})
             elif path == "/api/artifacts":
                 self._json({"artifacts": load_artifacts(), "source": "local"})
+            elif path == "/api/content":
+                self._json({"cards": load_content(), "source": "vault"})
             elif path == "/api/approvals":
                 self._json({"approvals": load_approvals(), "source": "local"})
             elif path == "/api/push/vapid":
@@ -277,6 +408,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/push/test":
                 self._push_test()
+                return
+            # Content Studio: update a card's status (writes vault frontmatter)
+            if path == "/api/content/status":
+                self._content_status()
                 return
             if path not in ("/v1/chat/completions", "/api/chat"):
                 self._json({"error": "not found"}, 404)
@@ -422,6 +557,26 @@ class Handler(BaseHTTPRequestHandler):
             url="/approvals",
             tag="hermes-test",
         )
+        self._json(result)
+
+    def _content_status(self) -> None:
+        """Update a content card's status (writes vault frontmatter)."""
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length) if length else b"{}"
+        try:
+            data = json.loads(body)
+        except Exception:
+            self._json({"error": "invalid JSON"}, 400)
+            return
+        file = data.get("file", "")
+        status = data.get("status", "")
+        if not file or status not in ("idea", "drafted", "approved", "scheduled", "posted", "rejected"):
+            self._json({"error": "file and valid status required"}, 400)
+            return
+        result = update_content_status(file, status)
+        if "error" in result:
+            self._json(result, 400)
+            return
         self._json(result)
 
     def _proxy_api_stream(self, path: str, stream: bool = False) -> None:
