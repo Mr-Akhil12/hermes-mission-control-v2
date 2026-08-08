@@ -27,13 +27,13 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 ### Screens
 | Screen | Status | Data source | Notes |
 |---|---|---|---|
-| Daily Brief (/) | ✅ | Turso (crons/runs) | 34 crons, 28 healthy, 500 runs |
+| Daily Brief (/) | ✅ | Turso briefs + jobs.json | One-thing card, real counts (36 crons / 6 failed / 28 ok), brief history — verified 8 Aug |
 | Dispatch (/dispatch) | ✅ | :8642 via proxy | Real Hermes responses |
 | Approvals (/approvals) | ✅ | Real Hermes approval system | Run tracker captures `approval.request` (state server watcher), approve once/always/deny via `/v1/runs/{id}/approval`, history — verified 7 Aug |
 | Cron Monitor (/crons) | ✅ | Turso + state.db | Run history, thinking viewer, output links |
 | Agents (/agents) | ⬜ | — | Stub, Phase 3 (React Flow graph) |
 | Sessions (/sessions) | ✅ | state.db | Real transcripts, stop reasons |
-| Channels (/channels) | 🟡 | Demo | Composer works, status is demo |
+| Channels (/channels) | ✅ | gateway_state + channel_directory + delivery_obligations | Real platform states (discord/webhook/api connected, telegram/slack retrying), 35 channels, 30 delivery log — verified 8 Aug |
 | Chat + Voice (/chat) | ✅ | ngrok tunnel → :8645 → :8642 | **v2: conversation history, SSE streaming, thinking stream, persisted sessions** — verified 7 Aug |
 | Content Studio (/studio) | ✅ | Obsidian vault via state server | Kanban (idea→drafted→approved→scheduled→posted), calendar view, platform filters, status writes back to vault — verified 8 Aug |
 | Trading (/trading) | ✅ | Turso (akhils-trading DB) | Net P&L, win rate, profit factor, risk meter, recent trades table — verified 8 Aug |
@@ -125,8 +125,8 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 - [x] **Content Studio** — kanban + calendar from Obsidian vault (153 pieces, status writes back to frontmatter) — verified 8 Aug
 - [x] **Trading** — Turso trades/strategy read, net P&L, win rate, profit factor, risk meter — verified 8 Aug
 - [x] **Personal** — memory wiki (MEMORY.md/USER.md entries) + Obsidian vault browser (folders → notes → reader) — verified 8 Aug
-- [ ] **Daily Brief generation cron** — bridge has code, needs morning cron
-- [ ] **Channels real** — gateway status, delivery log from real logs
+- [x] **Daily Brief generation cron** — hermes-os-daily-brief at 06:00 SAST; hero shows one-thing + real brief history — verified 8 Aug
+- [x] **Channels real** — gateway_state.json platforms, channel directory (35), delivery_obligations log — verified 8 Aug
 - [ ] **Dispatch queue** — Turso `tasks` table + bridge poll (survives tunnel drops)
 - [ ] **Artifacts auto-log** — bridge writes artifacts table on hermes-dump commits
 
