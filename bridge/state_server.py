@@ -31,6 +31,8 @@ JOBS = HERMES / "cron" / "jobs.json"
 EXEC = HERMES / "cron" / "executions.db"
 STATE = HERMES / "state.db"
 APPROVALS = HERMES / "approvals.json"
+GATEWAY_STATE = HERMES / "gateway_state.json"
+CHANNEL_DIR = HERMES / "channel_directory.json"
 VAULT_CONTENT = Path("/mnt/c/Users/pilla/Vault/second-brain/Content")
 VAULT_ROOT = Path("/mnt/c/Users/pilla/Vault/second-brain")
 MEMORY_DIR = HERMES / "memories"
@@ -302,6 +304,81 @@ def load_memory() -> list[dict]:
     return out
 
 
+def load_channels() -> dict:
+    """Real gateway platform states + channel directory + recent deliveries."""
+    platforms = []
+    if GATEWAY_STATE.exists():
+        try:
+            gs = json.loads(GATEWAY_STATE.read_text())
+        except Exception:
+            gs = {}
+        for name, info in gs.get("platforms", {}).items():
+            state = info.get("state", "unknown")
+            platforms.append(
+                {
+                    "id": name,
+                    "name": name.replace("_", " ").title(),
+                    "state": state,
+                    "connected": state == "connected",
+                    "error": info.get("error_message") or info.get("error_code") or None,
+                    "updated_at": info.get("updated_at", ""),
+                }
+            )
+    channels = []
+    if CHANNEL_DIR.exists():
+        try:
+            cd = json.loads(CHANNEL_DIR.read_text())
+        except Exception:
+            cd = {}
+        for platform, chans in cd.get("platforms", {}).items():
+            for ch in chans[:50]:
+                channels.append(
+                    {
+                        "id": ch.get("id", ""),
+                        "name": ch.get("name", ""),
+                        "guild": ch.get("guild", ""),
+                        "platform": platform,
+                        "type": ch.get("type", "channel"),
+                    }
+                )
+    # Recent delivery log from state.db delivery_obligations
+    deliveries = []
+    if STATE.exists():
+        try:
+            con = sqlite3.connect(STATE)
+            rows = con.execute(
+                "SELECT platform, state, attempts, created_at, updated_at, last_error, substr(content,1,120) "
+                "FROM delivery_obligations ORDER BY updated_at DESC LIMIT 30"
+            ).fetchall()
+            con.close()
+            deliveries = [
+                {
+                    "platform": r[0],
+                    "state": r[1],
+                    "attempts": r[2],
+                    "created_at": r[3],
+                    "updated_at": r[4],
+                    "last_error": r[5],
+                    "preview": r[6],
+                }
+                for r in rows
+            ]
+        except Exception:
+            deliveries = []
+    return {
+        "gateway": {
+            "state": (json.loads(GATEWAY_STATE.read_text()).get("gateway_state") if GATEWAY_STATE.exists() else "unknown"),
+            "active_agents": (json.loads(GATEWAY_STATE.read_text()).get("active_agents") if GATEWAY_STATE.exists() else 0),
+        }
+        if GATEWAY_STATE.exists()
+        else {"state": "unknown", "active_agents": 0},
+        "platforms": platforms,
+        "channels": channels,
+        "deliveries": deliveries,
+        "source": "gateway",
+    }
+
+
 def load_vault_tree() -> list[dict]:
     """List vault folders + note counts (browse view)."""
     if not VAULT_ROOT.exists():
@@ -401,6 +478,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"cards": load_content(), "source": "vault"})
             elif path == "/api/memory":
                 self._json({"memory": load_memory(), "source": "local"})
+            elif path == "/api/channels":
+                self._json(load_channels())
             elif path == "/api/vault":
                 self._json({"folders": load_vault_tree(), "source": "vault"})
             elif path.startswith("/api/vault/notes/"):
