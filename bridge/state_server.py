@@ -32,6 +32,8 @@ EXEC = HERMES / "cron" / "executions.db"
 STATE = HERMES / "state.db"
 APPROVALS = HERMES / "approvals.json"
 VAULT_CONTENT = Path("/mnt/c/Users/pilla/Vault/second-brain/Content")
+VAULT_ROOT = Path("/mnt/c/Users/pilla/Vault/second-brain")
+MEMORY_DIR = HERMES / "memories"
 PORT = int(os.environ.get("STATE_PORT", "8645"))
 
 
@@ -286,6 +288,77 @@ def update_content_status(file: str, status: str) -> dict:
     return {"ok": True, "file": file, "status": status}
 
 
+def load_memory() -> list[dict]:
+    """Read Hermes memory files (MEMORY.md + USER.md) as wiki entries."""
+    out = []
+    for name in ("MEMORY.md", "USER.md"):
+        p = MEMORY_DIR / name
+        if not p.exists():
+            continue
+        text = p.read_text(errors="replace")
+        # Split on § separators into entries
+        entries = [e.strip() for e in text.split("§") if e.strip()]
+        out.append({"file": name, "entries": entries, "size": len(text)})
+    return out
+
+
+def load_vault_tree() -> list[dict]:
+    """List vault folders + note counts (browse view)."""
+    if not VAULT_ROOT.exists():
+        return []
+    folders = []
+    for d in sorted(VAULT_ROOT.iterdir()):
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        count = sum(1 for p in d.rglob("*.md") if ".obsidian" not in p.parts)
+        folders.append({"name": d.name, "count": count})
+    return folders
+
+
+def load_vault_notes(folder: str, limit: int = 100) -> list[dict]:
+    """List notes in a vault folder (newest first)."""
+    if not folder or "/" in folder or "\\" in folder or folder.startswith("."):
+        return []
+    d = VAULT_ROOT / folder
+    if not d.is_dir():
+        return []
+    notes = []
+    for p in sorted(d.glob("*.md"), reverse=True):
+        try:
+            text = p.read_text(errors="replace")
+        except Exception:
+            continue
+        meta, body = _parse_frontmatter(text)
+        notes.append(
+            {
+                "name": p.stem,
+                "file": p.name,
+                "folder": folder,
+                "date": meta.get("date", ""),
+                "tags": meta.get("tags", ""),
+                "preview": body.strip()[:200],
+                "size": len(text),
+            }
+        )
+        if len(notes) >= limit:
+            break
+    return notes
+
+
+def load_vault_note(folder: str, file: str) -> dict:
+    """Read one vault note's full content."""
+    if not folder or "/" in folder or "\\" in folder or folder.startswith("."):
+        return {"error": "invalid folder"}
+    if not file or "/" in file or "\\" in file:
+        return {"error": "invalid filename"}
+    p = VAULT_ROOT / folder / file
+    if not p.exists():
+        return {"error": "note not found"}
+    text = p.read_text(errors="replace")
+    meta, body = _parse_frontmatter(text)
+    return {"name": p.stem, "file": p.name, "folder": folder, "meta": meta, "body": body, "size": len(text)}
+
+
 class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, status=200):
         body = json.dumps(obj).encode()
@@ -326,6 +399,26 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"artifacts": load_artifacts(), "source": "local"})
             elif path == "/api/content":
                 self._json({"cards": load_content(), "source": "vault"})
+            elif path == "/api/memory":
+                self._json({"memory": load_memory(), "source": "local"})
+            elif path == "/api/vault":
+                self._json({"folders": load_vault_tree(), "source": "vault"})
+            elif path.startswith("/api/vault/notes/"):
+                folder = path[len("/api/vault/notes/") :]
+                from urllib.parse import unquote
+
+                folder = unquote(folder)
+                self._json({"notes": load_vault_notes(folder), "folder": folder, "source": "vault"})
+            elif path.startswith("/api/vault/note/"):
+                rest = path[len("/api/vault/note/") :]
+                from urllib.parse import unquote
+
+                if "/" in rest:
+                    folder, file = rest.split("/", 1)
+                    folder, file = unquote(folder), unquote(file)
+                    self._json(load_vault_note(folder, file))
+                else:
+                    self._json({"error": "folder/file required"}, 400)
             elif path == "/api/approvals":
                 self._json({"approvals": load_approvals(), "source": "local"})
             elif path == "/api/push/vapid":
