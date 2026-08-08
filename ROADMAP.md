@@ -1,7 +1,7 @@
 # Hermes OS v2 — Feature Tracking & Roadmap
 
 **Repo:** `Mr-Akhil12/hermes-mission-control-v2` · **Live:** https://hermes-mission-control-v2.vercel.app
-**Started:** 6 Aug 2026 · **Status:** Phase 1 complete, Phase 2 in progress
+**Started:** 6 Aug 2026 · **Status:** Phase 1 + Phase 2 complete, Phase 3 next
 
 This is the single source of truth for what's built, what broke, what's next, and how desktop vs mobile differ. Every feature, every bug, every decision — tracked here.
 
@@ -28,7 +28,7 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 | Screen | Status | Data source | Notes |
 |---|---|---|---|
 | Daily Brief (/) | ✅ | Turso briefs + jobs.json | One-thing card, real counts (36 crons / 6 failed / 28 ok), brief history — verified 8 Aug |
-| Dispatch (/dispatch) | ✅ | :8642 via proxy | Real Hermes responses |
+| Dispatch (/dispatch) | ✅ | :8642 via proxy + Turso fallback | Real Hermes responses, **queues to Turso when tunnel down**, task queue view |
 | Approvals (/approvals) | ✅ | Real Hermes approval system | Run tracker captures `approval.request` (state server watcher), approve once/always/deny via `/v1/runs/{id}/approval`, history — verified 7 Aug |
 | Cron Monitor (/crons) | ✅ | Turso + state.db | Run history, thinking viewer, output links |
 | Agents (/agents) | ⬜ | — | Stub, Phase 3 (React Flow graph) |
@@ -37,7 +37,7 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 | Chat + Voice (/chat) | ✅ | ngrok tunnel → :8645 → :8642 | **v2: conversation history, SSE streaming, thinking stream, persisted sessions** — verified 7 Aug |
 | Content Studio (/studio) | ✅ | Obsidian vault via state server | Kanban (idea→drafted→approved→scheduled→posted), calendar view, platform filters, status writes back to vault — verified 8 Aug |
 | Trading (/trading) | ✅ | Turso (akhils-trading DB) | Net P&L, win rate, profit factor, risk meter, recent trades table — verified 8 Aug |
-| Development (/dev) | ✅ | GitHub + artifacts | Artifact search real |
+| Development (/dev) | ✅ | GitHub + artifacts | Artifact search real, **bridge auto-logs repos to Turso every ~2 min** |
 | Personal (/personal) | ✅ | Hermes memory + Obsidian vault | Memory wiki (12+13 entries), vault folder grid → note list → full reader — verified 8 Aug |
 | Native UI (/native) | ✅ | /native-proxy same-origin + WS via funnel | Full embed: login, dashboard, live WS — verified 7 Aug |
 | Settings (/settings) | ✅ | — | Data source status, lock now, **push notifications enable/disable/test** |
@@ -119,7 +119,7 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 - [x] Chat + Voice (Jarvis)
 - [x] Deploy to Vercel + auto-deploy on push
 
-### Phase 2 — Personal sections + real data everywhere (in progress)
+### Phase 2 — Personal sections + real data everywhere (✅ complete 8 Aug)
 - [x] **Turso token-expiry watchdog** — **REPLACED with never-expiring tokens** (7 Aug): minted `--expiration never` tokens for dashboard + budget app, updated secrets.md + Vercel envs + Bitwarden. No watchdog needed — tokens never expire.
 - [x] **Approvals real** — state-server run tracker captures `approval.request` SSE events into `~/.hermes/approvals.json`; dispatch switched to `/v1/runs`; approve once/always/deny wired to `/v1/runs/{id}/approval`; 15s auto-refresh + history
 - [x] **Content Studio** — kanban + calendar from Obsidian vault (153 pieces, status writes back to frontmatter) — verified 8 Aug
@@ -127,8 +127,8 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 - [x] **Personal** — memory wiki (MEMORY.md/USER.md entries) + Obsidian vault browser (folders → notes → reader) — verified 8 Aug
 - [x] **Daily Brief generation cron** — hermes-os-daily-brief at 06:00 SAST; hero shows one-thing + real brief history — verified 8 Aug
 - [x] **Channels real** — gateway_state.json platforms, channel directory (35), delivery_obligations log — verified 8 Aug
-- [ ] **Dispatch queue** — Turso `tasks` table + bridge poll (survives tunnel drops)
-- [ ] **Artifacts auto-log** — bridge writes artifacts table on hermes-dump commits
+- [x] **Dispatch queue** — dispatch falls back to Turso `tasks` when tunnel down; bridge polls every 30s; queue view on Dispatch page — verified 8 Aug
+- [x] **Artifacts auto-log** — bridge scans ~/repos/hermes-dump + hyperframes every ~2 min, inserts new files into Turso artifacts (dedup by URL) — verified 8 Aug
 
 ### Phase 3 — Agents + polish (next)
 - [ ] **Agents live graph** — React Flow, subagent spawns, activity feed
