@@ -192,6 +192,89 @@ def push_failed_crons() -> None:
             log(f"push failed for {job_id}: {e}")
 
 
+# ── 1c. Artifacts auto-log (hermes-dump / hyperframes) ───────────────
+
+REPOS_ROOT = Path(os.path.expanduser("~/repos"))
+
+# Folders/files in a repo that are NOT user artifacts (skip noise).
+_SKIP_DIRS = {".git", "node_modules", ".next", "__pycache__", ".obsidian", ".vercel"}
+_SKIP_EXTS = {".pyc", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".lock", ".tmp"}
+
+
+def _artifact_kind(path: Path) -> str:
+    ext = path.suffix.lower()
+    if ext in (".mp4", ".mov", ".webm"):
+        return "video"
+    if ext in (".html", ".htm"):
+        return "html"
+    if ext in (".md", ".txt", ".rst"):
+        return "text"
+    if ext in (".pdf",):
+        return "research"
+    if ext in (".py", ".js", ".ts", ".tsx", ".sh", ".json", ".yaml", ".yml", ".sql"):
+        return "code"
+    if ext in (".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif"):
+        return "image"
+    if ext in (".mp3", ".wav", ".ogg", ".m4a"):
+        return "audio"
+    return "text"
+
+
+def auto_log_artifacts() -> None:
+    """Scan ~/repos/hermes-dump + hyperframes for files not yet in Turso
+    `artifacts` and insert them as links (never blobs)."""
+    if not turso_enabled():
+        return
+    try:
+        existing = {
+            r["url"]
+            for r in turso_query(
+                "SELECT url FROM artifacts WHERE repo IN ('hermes-dump', 'hyperframes')"
+            )
+        }
+    except Exception as e:
+        log(f"artifacts: could not read existing: {e}")
+        return
+
+    inserted = 0
+    for repo in ("hermes-dump", "hyperframes"):
+        base = REPOS_ROOT / repo
+        if not base.is_dir():
+            continue
+        for p in sorted(base.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(base).as_posix()
+            if any(part in _SKIP_DIRS for part in p.parts):
+                continue
+            if p.suffix.lower() in _SKIP_EXTS:
+                continue
+            if rel.startswith(".git"):
+                continue
+            url = f"https://github.com/Mr-Akhil12/{repo}/blob/main/{rel}"
+            if url in existing:
+                continue
+            try:
+                turso_execute(
+                    "INSERT OR IGNORE INTO artifacts (title, kind, repo, path, url, source, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        p.name,
+                        _artifact_kind(p),
+                        repo,
+                        rel,
+                        url,
+                        "bridge",
+                        datetime.now(SAST).isoformat(),
+                    ],
+                )
+                inserted += 1
+            except Exception as e:
+                log(f"artifacts: insert failed for {rel}: {e}")
+    if inserted:
+        log(f"artifacts: logged {inserted} new file(s) → Turso")
+
+
 # ── 2. Poll task queue → run Hermes ──────────────────────────────────
 
 def poll_tasks(once: bool = False) -> None:
@@ -281,11 +364,16 @@ def main() -> None:
         poll_tasks(once=True)
     elif mode == "loop":
         log(f"bridge started (turso={'on' if turso_enabled() else 'off'})")
+        tick = 0
         while True:
             try:
                 mirror_state()
                 push_failed_crons()
                 poll_tasks()
+                # Artifacts scan is heavier — every 4th cycle (~2 min).
+                tick += 1
+                if tick % 4 == 0:
+                    auto_log_artifacts()
                 time.sleep(30)
             except KeyboardInterrupt:
                 log("bridge stopped")
