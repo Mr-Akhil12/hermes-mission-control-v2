@@ -10,6 +10,10 @@ export NATIVE_URL="http://127.0.0.1:9119"
 
 cd /home/akhil/hermes-mission-control-v2
 
+# Use the Hermes venv python — it has pywebpush (Web Push) + all deps.
+PY=/home/akhil/.hermes/hermes-agent/venv/bin/python3
+[ -x "$PY" ] || PY=python3
+
 # Clean shutdown: kill children on SIGTERM so systemd restarts don't leave
 # duplicate bridge loops behind (KillMode=control-group + this trap).
 STATE_PID=""
@@ -22,23 +26,23 @@ cleanup() {
 trap cleanup TERM INT
 
 # Start the state server in the background
-python3 bridge/state_server.py &
+$PY bridge/state_server.py &
 STATE_PID=$!
 
 # Run the bridge loop in the background too (systemd tracks the wrapper)
-python3 bridge/bridge.py loop &
+$PY bridge/bridge.py loop &
 BRIDGE_PID=$!
 
 # If either dies, restart both
 while true; do
   if ! kill -0 $STATE_PID 2>/dev/null; then
     echo "[wrapper] state server died, restarting"
-    python3 bridge/state_server.py &
+    $PY bridge/state_server.py &
     STATE_PID=$!
   fi
   if ! kill -0 $BRIDGE_PID 2>/dev/null; then
     echo "[wrapper] bridge died, restarting"
-    python3 bridge/bridge.py loop &
+    $PY bridge/bridge.py loop &
     BRIDGE_PID=$!
   fi
   sleep 10

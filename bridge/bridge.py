@@ -23,11 +23,15 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+import push  # noqa: E402
+
 SAST = timezone(timedelta(hours=2))
 HERMES = Path(os.path.expanduser("~/.hermes"))
 JOBS = HERMES / "cron" / "jobs.json"
 EXEC = HERMES / "cron" / "executions.db"
 STATE = HERMES / "state.db"
+SEEN_FAILS = HERMES / "push_seen_fails.json"
 
 TURSO_URL = os.environ.get("TURSO_URL", "")
 TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "")
@@ -137,6 +141,57 @@ def mirror_state() -> None:
         log(f"local-only mode — would mirror {list(state.keys())}")
 
 
+# ── 1b. Push alerts for failed crons ─────────────────────────────────
+
+def _load_seen_fails() -> set:
+    if not SEEN_FAILS.exists():
+        return set()
+    try:
+        return set(json.loads(SEEN_FAILS.read_text()))
+    except Exception:
+        return set()
+
+
+def _save_seen_fails(seen: set) -> None:
+    SEEN_FAILS.write_text(json.dumps(sorted(seen)))
+
+
+def push_failed_crons() -> None:
+    """Detect NEW failed cron runs and push a notification (once each)."""
+    if not EXEC.exists():
+        return
+    con = sqlite3.connect(EXEC)
+    rows = con.execute(
+        "SELECT job_id, status, claimed_at, error FROM executions "
+        "WHERE status = 'error' AND claimed_at > datetime('now','-2 hours') "
+        "ORDER BY claimed_at DESC LIMIT 20"
+    ).fetchall()
+    con.close()
+    if not rows:
+        return
+    seen = _load_seen_fails()
+    fresh = []
+    for job_id, status, claimed_at, error in rows:
+        key = f"{job_id}:{claimed_at}"
+        if key in seen:
+            continue
+        seen.add(key)
+        fresh.append((job_id, claimed_at, error))
+    if not fresh:
+        return
+    _save_seen_fails(seen)
+    for job_id, claimed_at, error in fresh:
+        try:
+            push.send_notification(
+                "❌ Cron failed",
+                f"{job_id} failed at {claimed_at} — {str(error or '')[:100]}",
+                url="/crons",
+                tag=f"cron-fail-{job_id}",
+            )
+        except Exception as e:
+            log(f"push failed for {job_id}: {e}")
+
+
 # ── 2. Poll task queue → run Hermes ──────────────────────────────────
 
 def poll_tasks(once: bool = False) -> None:
@@ -229,6 +284,7 @@ def main() -> None:
         while True:
             try:
                 mirror_state()
+                push_failed_crons()
                 poll_tasks()
                 time.sleep(30)
             except KeyboardInterrupt:

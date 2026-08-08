@@ -22,6 +22,9 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+import push  # noqa: E402
+
 SAST = timezone(timedelta(hours=2))
 HERMES = Path(os.path.expanduser("~/.hermes"))
 JOBS = HERMES / "cron" / "jobs.json"
@@ -194,6 +197,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"artifacts": load_artifacts(), "source": "local"})
             elif path == "/api/approvals":
                 self._json({"approvals": load_approvals(), "source": "local"})
+            elif path == "/api/push/vapid":
+                self._json({"public_key": push.public_vapid(), "available": push.available()})
+            elif path == "/api/push/status":
+                self._json({"enabled": push.available(), "subscriptions": len(push._load_subs())})
             elif path == "/api/health":
                 self._json({"ok": True, "time": datetime.now(SAST).isoformat(), "port": PORT})
             else:
@@ -260,6 +267,16 @@ class Handler(BaseHTTPRequestHandler):
             # to the run's event stream to capture approval.request events.
             if path == "/v1/runs":
                 self._start_tracked_run()
+                return
+            # Web Push: subscribe / unsubscribe / test
+            if path == "/api/push/subscribe":
+                self._push_subscribe()
+                return
+            if path == "/api/push/unsubscribe":
+                self._push_unsubscribe()
+                return
+            if path == "/api/push/test":
+                self._push_test()
                 return
             if path not in ("/v1/chat/completions", "/api/chat"):
                 self._json({"error": "not found"}, 404)
@@ -342,6 +359,17 @@ class Handler(BaseHTTPRequestHandler):
                                     "choices": ev.get("choices", ["once", "session", "always", "deny"]),
                                     "created_at": datetime.now(SAST).isoformat(),
                                 })
+                                # Push a notification so the phone pings even
+                                # when the dashboard isn't open.
+                                try:
+                                    push.send_notification(
+                                        "⚠️ Approval needed",
+                                        f"{ev.get('command', 'Dangerous command')[:120]} — tap to approve or deny",
+                                        url="/approvals",
+                                        tag=f"approval-{run_id}",
+                                    )
+                                except Exception as pe:
+                                    print(f"[state-server] push error: {pe}", flush=True)
                             elif ev.get("event") in ("run.completed", "run.cancelled", "run.failed"):
                                 # Mark any pending approval for this run resolved.
                                 entries = load_approvals()
@@ -355,6 +383,46 @@ class Handler(BaseHTTPRequestHandler):
                 print(f"[state-server] run watcher error for {run_id}: {e}", flush=True)
 
         threading.Thread(target=_watch, daemon=True).start()
+
+    def _push_subscribe(self) -> None:
+        """Store a browser push subscription (PushManager.subscribe payload)."""
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length) if length else b"{}"
+        try:
+            sub = json.loads(body)
+        except Exception:
+            self._json({"error": "invalid JSON"}, 400)
+            return
+        if not sub.get("endpoint") or not sub.get("keys"):
+            self._json({"error": "endpoint and keys required"}, 400)
+            return
+        count = push.subscribe(sub)
+        self._json({"ok": True, "subscriptions": count})
+
+    def _push_unsubscribe(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length) if length else b"{}"
+        try:
+            data = json.loads(body)
+        except Exception:
+            self._json({"error": "invalid JSON"}, 400)
+            return
+        endpoint = data.get("endpoint", "")
+        if not endpoint:
+            self._json({"error": "endpoint required"}, 400)
+            return
+        count = push.unsubscribe(endpoint)
+        self._json({"ok": True, "subscriptions": count})
+
+    def _push_test(self) -> None:
+        """Send a test notification to all subscriptions."""
+        result = push.send_notification(
+            "🔔 Hermes OS",
+            "Push notifications are live — approvals and failed crons will ping you here.",
+            url="/approvals",
+            tag="hermes-test",
+        )
+        self._json(result)
 
     def _proxy_api_stream(self, path: str, stream: bool = False) -> None:
         """Forward a request to the Hermes API (:8642).
