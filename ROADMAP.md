@@ -38,7 +38,7 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 | Content Studio (/studio) | ✅ | Obsidian vault via state server | Kanban (idea→drafted→approved→scheduled→posted), calendar view, platform filters, status writes back to vault — verified 8 Aug |
 | Trading (/trading) | ✅ | Turso (akhils-trading DB) | Net P&L, win rate, profit factor, risk meter, recent trades table — verified 8 Aug |
 | Development (/dev) | ✅ | GitHub + artifacts | Artifact search real |
-| Personal (/personal) | ⬜ | — | Stub, Phase 2 (memory + vault) |
+| Personal (/personal) | ✅ | Hermes memory + Obsidian vault | Memory wiki (12+13 entries), vault folder grid → note list → full reader — verified 8 Aug |
 | Native UI (/native) | ✅ | /native-proxy same-origin + WS via funnel | Full embed: login, dashboard, live WS — verified 7 Aug |
 | Settings (/settings) | ✅ | — | Data source status, lock now, **push notifications enable/disable/test** |
 
@@ -124,7 +124,7 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 - [x] **Approvals real** — state-server run tracker captures `approval.request` SSE events into `~/.hermes/approvals.json`; dispatch switched to `/v1/runs`; approve once/always/deny wired to `/v1/runs/{id}/approval`; 15s auto-refresh + history
 - [x] **Content Studio** — kanban + calendar from Obsidian vault (153 pieces, status writes back to frontmatter) — verified 8 Aug
 - [x] **Trading** — Turso trades/strategy read, net P&L, win rate, profit factor, risk meter — verified 8 Aug
-- [ ] **Personal** — memory browser (Hermes memory API), Obsidian vault
+- [x] **Personal** — memory wiki (MEMORY.md/USER.md entries) + Obsidian vault browser (folders → notes → reader) — verified 8 Aug
 - [ ] **Daily Brief generation cron** — bridge has code, needs morning cron
 - [ ] **Channels real** — gateway status, delivery log from real logs
 - [ ] **Dispatch queue** — Turso `tasks` table + bridge poll (survives tunnel drops)
