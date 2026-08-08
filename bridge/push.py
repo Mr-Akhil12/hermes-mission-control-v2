@@ -6,6 +6,7 @@ notifications through the browser push service (FCM/Mozilla/Apple).
 
 VAPID keys live in ~/.hermes/push_vapid.json (generated on first use).
 """
+import base64
 import json
 import os
 from pathlib import Path
@@ -64,15 +65,21 @@ def get_vapid() -> dict:
 
 
 def public_vapid() -> str:
-    """Return the VAPID public key as a base64url string (no PEM wrapper).
+    """Return the VAPID public key as a base64url string (raw EC point).
 
-    Browsers need the raw base64url key for pushManager.subscribe() — the
-    PEM header/footer and newlines break atob() on the client.
+    Browsers expect the raw 65-byte uncompressed point (X9.62, starts 0x04)
+    for pushManager.subscribe() — NOT the SPKI/DER wrapper. The PEM header,
+    newlines, and DER structure all break the browser's key parser.
     """
+    from cryptography.hazmat.primitives import serialization
+
     pem = get_vapid()["public_key"]
-    b64 = "".join(line for line in pem.splitlines() if "-----" not in line)
-    # Standard base64 -> base64url, strip padding.
-    return b64.replace("+", "-").replace("/", "_").rstrip("=")
+    pub = serialization.load_pem_public_key(pem.encode())
+    raw = pub.public_bytes(
+        serialization.Encoding.X962,
+        serialization.PublicFormat.UncompressedPoint,
+    )
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
 
 def subscribe(sub: dict) -> int:
