@@ -1,20 +1,13 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Settings as SettingsIcon, Fingerprint, Database, Wifi, Lock, KeyRound, Bell, BellOff, Send } from "lucide-react";
-import { lockNow, setPin, verifyPin } from "@/lib/auth";
+import { Settings as SettingsIcon, Fingerprint, Database, Wifi, Lock, Bell, BellOff, Send } from "lucide-react";
+import { lockNow } from "@/lib/auth";
 import { useRouter } from "next/navigation";
 import { isPushSupported, getPushStatus, enablePush, disablePush, testPush } from "@/lib/push";
 
 export default function SettingsPage() {
   const router = useRouter();
-  const [changePinOpen, setChangePinOpen] = useState(false);
-  const [currentPin, setCurrentPin] = useState("");
-  const [newPin, setNewPin] = useState("");
-  const [confirmNewPin, setConfirmNewPin] = useState("");
-  const [pinMsg, setPinMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const [pinBusy, setPinBusy] = useState(false);
-
   const [pushSupported, setPushSupported] = useState(false);
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushSubs, setPushSubs] = useState(0);
@@ -82,25 +75,6 @@ export default function SettingsPage() {
     lockNow();
     router.refresh();
     window.location.reload();
-  };
-
-  const handleChangePin = async () => {
-    setPinMsg(null);
-    if (newPin.length < 4) return setPinMsg({ ok: false, text: "New PIN must be at least 4 digits." });
-    if (newPin !== confirmNewPin) return setPinMsg({ ok: false, text: "New PINs don't match." });
-    setPinBusy(true);
-    const ok = await verifyPin(currentPin);
-    if (!ok) {
-      setPinBusy(false);
-      return setPinMsg({ ok: false, text: "Current PIN is wrong." });
-    }
-    await setPin(newPin);
-    setPinBusy(false);
-    setPinMsg({ ok: true, text: "PIN changed. It's permanent until you change it again here." });
-    setCurrentPin("");
-    setNewPin("");
-    setConfirmNewPin("");
-    setChangePinOpen(false);
   };
 
   return (
@@ -184,7 +158,7 @@ export default function SettingsPage() {
 
       <div className="card p-5">
         <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider" style={{ color: "var(--text-faint)" }}>Security</h2>
-        <p className="text-sm" style={{ color: "var(--text-dim)" }}>Lock the dashboard now — you'll need your PIN or biometrics to get back in.</p>
+        <p className="text-sm" style={{ color: "var(--text-dim)" }}>Lock the dashboard now — you'll need your PIN or biometrics to get back in. Your PIN is permanent and cannot be changed.</p>
         <div className="mt-3 flex flex-wrap gap-2">
           <button
             onClick={handleLock}
@@ -193,55 +167,7 @@ export default function SettingsPage() {
           >
             <Lock className="h-4 w-4" /> Lock now
           </button>
-          <button
-            onClick={() => { setChangePinOpen((v) => !v); setPinMsg(null); }}
-            className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold"
-            style={{ background: "rgba(124,108,255,0.12)", color: "var(--accent)" }}
-          >
-            <KeyRound className="h-4 w-4" /> Change PIN
-          </button>
         </div>
-
-        {changePinOpen && (
-          <div className="mt-4 space-y-2 rounded-lg border p-4" style={{ borderColor: "var(--card-border)" }}>
-            <p className="text-xs" style={{ color: "var(--text-faint)" }}>
-              PIN is permanent once set. Changing it requires your current PIN.
-            </p>
-            <input
-              type="password" inputMode="numeric" value={currentPin}
-              onChange={(e) => setCurrentPin(e.target.value.replace(/\D/g, ""))}
-              placeholder="Current PIN" maxLength={8}
-              className="w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none"
-              style={{ borderColor: "var(--card-border)", color: "var(--text)" }}
-            />
-            <input
-              type="password" inputMode="numeric" value={newPin}
-              onChange={(e) => setNewPin(e.target.value.replace(/\D/g, ""))}
-              placeholder="New PIN" maxLength={8}
-              className="w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none"
-              style={{ borderColor: "var(--card-border)", color: "var(--text)" }}
-            />
-            <input
-              type="password" inputMode="numeric" value={confirmNewPin}
-              onChange={(e) => setConfirmNewPin(e.target.value.replace(/\D/g, ""))}
-              placeholder="Confirm new PIN" maxLength={8}
-              className="w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none"
-              style={{ borderColor: "var(--card-border)", color: "var(--text)" }}
-            />
-            <button
-              onClick={handleChangePin} disabled={pinBusy}
-              className="w-full rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
-              style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-2))" }}
-            >
-              {pinBusy ? "Changing…" : "Change PIN"}
-            </button>
-            {pinMsg && (
-              <div className="rounded-lg p-2 text-xs" style={{ background: pinMsg.ok ? "rgba(61,220,151,0.10)" : "rgba(255,92,92,0.10)", color: pinMsg.ok ? "var(--green)" : "var(--red)" }}>
-                {pinMsg.text}
-              </div>
-            )}
-          </div>
-        )}
       </div>
     </div>
   );

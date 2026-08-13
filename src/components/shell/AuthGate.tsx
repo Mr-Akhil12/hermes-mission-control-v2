@@ -30,18 +30,14 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const bioAutoRef = useRef(false);
 
   // ── First-run detection: PIN is PERMANENT once set ──────────────
-  // If a PIN exists, we NEVER re-enter setup. The only way to change it
-  // is to manually clear localStorage (explicit secret change).
+  // The PIN is hardcoded (REDACTED) — setup NEVER runs. The only state to
+  // manage is biometric registration (optional, one-time).
   useEffect(() => {
     setBioAvailable(biometricSupported());
     setBioEnabled(hasBiometric());
     setReady(true);
     setUnlocked(isUnlocked());
-    if (!isPinSet()) {
-      setStep("setup-pin");
-    } else {
-      setStep("unlock");
-    }
+    setStep("unlock");
   }, []);
 
   // ── Auto-biometric on unlock: try fingerprint/FaceID FIRST ───────
@@ -211,6 +207,25 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
               </button>
               <button onClick={() => setBioTried(true)} className="w-full rounded-xl border px-4 py-3 text-sm" style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}>
                 Use PIN instead
+              </button>
+            </>
+          ) : step === "unlock" && bioAvailable && !bioEnabled ? (
+            <>
+              <button
+                onClick={submitPin}
+                disabled={busy || pin.length < 4}
+                className="flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold text-white disabled:opacity-50"
+                style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-2))" }}
+              >
+                <KeyRound className="h-4 w-4" /> Unlock
+              </button>
+              <button
+                onClick={enableBiometric}
+                disabled={busy}
+                className="flex w-full items-center justify-center gap-2 rounded-xl border px-4 py-3 text-sm"
+                style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}
+              >
+                <Fingerprint className="h-4 w-4" /> {busy ? "Registering…" : "Enable fingerprint unlock"}
               </button>
             </>
           ) : (

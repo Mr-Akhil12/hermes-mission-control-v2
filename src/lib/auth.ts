@@ -9,6 +9,14 @@ const PIN_KEY = "hermesos.pin.hash";
 const CRED_KEY = "hermesos.webauthn.cred";
 const UNLOCK_KEY = "hermesos.unlocked";
 
+/**
+ * HARDCODED PIN (user-specified 13 Aug 2026): REDACTED.
+ * The PIN is permanent and can NEVER be changed or re-set. The setup flow
+ * never runs because isPinSet() always returns true, and setPin() is a no-op.
+ * Hash = SHA-256("hermes-os:REDACTED:v1").
+ */
+const HARDCODED_PIN_HASH = "REDACTED";
+
 /** SHA-256 via WebCrypto — salted with a static local pepper (not a secret, just obfuscation). */
 export async function hashPin(pin: string): Promise<string> {
   const data = new TextEncoder().encode(`hermes-os:${pin}:v1`);
@@ -32,18 +40,23 @@ export async function hashPin(pin: string): Promise<string> {
   return `${h1.toString(16).padStart(8, "0")}${h2.toString(16).padStart(8, "0")}`;
 }
 
+/** PIN is ALWAYS set — the hardcoded PIN is permanent. Setup never runs. */
 export function isPinSet(): boolean {
-  return !!localStorage.getItem(PIN_KEY);
+  return true;
 }
 
-export async function setPin(pin: string): Promise<void> {
-  localStorage.setItem(PIN_KEY, await hashPin(pin));
+/** No-op — the PIN can never be changed. */
+export async function setPin(_pin: string): Promise<void> {
+  // Intentionally does nothing. The PIN is hardcoded (REDACTED) and permanent.
 }
 
 export async function verifyPin(pin: string): Promise<boolean> {
+  // Hardcoded PIN is the only valid PIN. localStorage hash kept for migration only.
   const stored = localStorage.getItem(PIN_KEY);
-  if (!stored) return false;
-  return (await hashPin(pin)) === stored;
+  const hardcodedOk = (await hashPin(pin)) === HARDCODED_PIN_HASH;
+  if (hardcodedOk) return true;
+  if (stored) return (await hashPin(pin)) === stored;
+  return false;
 }
 
 export function isUnlocked(): boolean {
