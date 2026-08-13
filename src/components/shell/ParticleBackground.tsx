@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { useTheme } from "next-themes";
 
 /**
  * AgenticBiz particle field — lightweight interactive canvas.
@@ -9,9 +10,12 @@ import { useEffect, useRef } from "react";
  * - Interaction: particles gently repel from cursor / finger
  * - Connection lines appear when particles are close (short links motif)
  * - Auto-pauses when tab hidden; ~40 particles max for perf
+ * - Theme-aware: light mode uses brighter, more vibrant colors so the
+ *   field reads clearly on the pale background (13 Aug 2026).
  */
 export function ParticleBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const { resolvedTheme } = useTheme();
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -24,6 +28,10 @@ export function ParticleBackground() {
     let width = 0;
     let height = 0;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    // Theme-aware styling — recomputed on every frame so theme flips take
+    // effect immediately without a remount.
+    const isDark = () => document.documentElement.classList.contains("dark");
 
     type P = { x: number; y: number; vx: number; vy: number; r: number; hue: number };
     let particles: P[] = [];
@@ -66,6 +74,15 @@ export function ParticleBackground() {
       if (!running) return;
       ctx.clearRect(0, 0, width, height);
 
+      const dark = isDark();
+      // Light mode: brighter dots + stronger links so they pop on pale bg.
+      const dotSat = dark ? 80 : 95;
+      const dotLight = dark ? 66 : 62;
+      const dotActiveLight = dark ? 72 : 68;
+      const dotAlpha = dark ? 0.55 : 0.85;
+      const linkAlphaBase = dark ? 0.28 : 0.55;
+      const linkHue = dark ? "124,108,255" : "91,76,240";
+
       // Connection lines (short links) — draw before dots
       const linkDist = 110;
       ctx.lineWidth = 0.6;
@@ -77,8 +94,8 @@ export function ParticleBackground() {
           const dy = a.y - b.y;
           const d2 = dx * dx + dy * dy;
           if (d2 < linkDist * linkDist) {
-            const alpha = (1 - Math.sqrt(d2) / linkDist) * 0.28;
-            ctx.strokeStyle = `rgba(124,108,255,${alpha})`;
+            const alpha = (1 - Math.sqrt(d2) / linkDist) * linkAlphaBase;
+            ctx.strokeStyle = `rgba(${linkHue},${alpha})`;
             ctx.beginPath();
             ctx.moveTo(a.x, a.y);
             ctx.lineTo(b.x, b.y);
@@ -113,7 +130,7 @@ export function ParticleBackground() {
 
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-        ctx.fillStyle = `hsla(${p.hue}, 80%, ${MOUSE.active ? 72 : 66}%, 0.55)`;
+        ctx.fillStyle = `hsla(${p.hue}, ${dotSat}%, ${MOUSE.active ? dotActiveLight : dotLight}%, ${dotAlpha})`;
         ctx.fill();
       }
 
@@ -145,7 +162,7 @@ export function ParticleBackground() {
       document.removeEventListener("pointerleave", onLeave);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, []);
+  }, [resolvedTheme]);
 
   return (
     <canvas

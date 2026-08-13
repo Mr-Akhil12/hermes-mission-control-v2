@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
+import { lockNow } from "@/lib/auth";
 import {
   LayoutDashboard,
   Send,
@@ -20,6 +21,7 @@ import {
   Settings,
   Sun,
   Moon,
+  Lock,
   Command,
 } from "lucide-react";
 
@@ -124,14 +126,28 @@ export function Shell({ children }: { children: React.ReactNode }) {
           </button>
           <div className="md:hidden" />
 
-          <button
-            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-            className="flex h-9 w-9 items-center justify-center rounded-lg border"
-            style={{ borderColor: "var(--card-border)" }}
-            aria-label="Toggle theme"
-          >
-            {mounted && theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                lockNow();
+                window.location.reload();
+              }}
+              className="flex h-9 w-9 items-center justify-center rounded-lg border"
+              style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}
+              aria-label="Lock dashboard"
+              title="Lock dashboard"
+            >
+              <Lock className="h-4 w-4" />
+            </button>
+            <button
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              className="flex h-9 w-9 items-center justify-center rounded-lg border"
+              style={{ borderColor: "var(--card-border)" }}
+              aria-label="Toggle theme"
+            >
+              {mounted && theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </button>
+          </div>
         </header>
 
         <main className="flex-1 px-4 py-6 md:px-8">{children}</main>
