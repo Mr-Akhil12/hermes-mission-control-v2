@@ -55,7 +55,9 @@ export function ParticleBackground() {
       canvas.style.width = `${width}px`;
       canvas.style.height = `${height}px`;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      const target = Math.min(Math.floor((width * height) / 26000), 48);
+      // Light mode: denser field so the vibrancy reads clearly.
+      const density = document.documentElement.classList.contains("dark") ? 26000 : 19000;
+      const target = Math.min(Math.floor((width * height) / density), 60);
       particles = Array.from({ length: Math.max(target, 18) }, spawn);
     };
 
@@ -78,12 +80,12 @@ export function ParticleBackground() {
       // Light mode: brighter, bigger, richer dots + stronger links so they
       // really pop on the pale bg (user: "not bright and vibrant enough").
       const dotSat = dark ? 80 : 100;
-      const dotLight = dark ? 66 : 55;
-      const dotActiveLight = dark ? 72 : 60;
+      const dotLight = dark ? 66 : 50;
+      const dotActiveLight = dark ? 72 : 55;
       const dotAlpha = dark ? 0.55 : 1;
-      const dotScale = dark ? 1 : 1.5;
-      const linkAlphaBase = dark ? 0.28 : 0.7;
-      const linkWidth = dark ? 0.6 : 1;
+      const dotScale = dark ? 1 : 1.8;
+      const linkAlphaBase = dark ? 0.28 : 0.85;
+      const linkWidth = dark ? 0.6 : 1.4;
       const linkHue = dark ? "124,108,255" : "91,76,240";
 
       // Connection lines (short links) — draw before dots
