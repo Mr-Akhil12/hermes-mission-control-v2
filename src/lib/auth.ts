@@ -51,12 +51,53 @@ export async function setPin(_pin: string): Promise<void> {
 }
 
 export async function verifyPin(pin: string): Promise<boolean> {
-  // Hardcoded PIN is the only valid PIN. localStorage hash kept for migration only.
+  // Hardcoded PIN is the offline master fallback. localStorage hash kept for migration only.
   const stored = localStorage.getItem(PIN_KEY);
   const hardcodedOk = (await hashPin(pin)) === HARDCODED_PIN_HASH;
   if (hardcodedOk) return true;
   if (stored) return (await hashPin(pin)) === stored;
   return false;
+}
+
+/* ── Universal PIN (Turso) ─────────────────────────────────────────── */
+
+/** Fetch the universal PIN hash from Turso (same PIN on every device). */
+export async function fetchRemotePinHash(): Promise<string | null> {
+  try {
+    const res = await fetch("/api/auth/pin", { cache: "no-store" });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return typeof data?.hash === "string" ? data.hash : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Verify a PIN against the universal (Turso) hash, falling back to the hardcoded master. */
+export async function verifyPinUniversal(pin: string): Promise<boolean> {
+  const remote = await fetchRemotePinHash();
+  if (remote) {
+    return (await hashPin(pin)) === remote;
+  }
+  // Turso unreachable → hardcoded master PIN still works (offline fallback).
+  return (await hashPin(pin)) === HARDCODED_PIN_HASH;
+}
+
+/** Change the universal PIN (writes the new hash to Turso). Returns true on success. */
+export async function changePinUniversal(newPin: string): Promise<boolean> {
+  const hash = await hashPin(newPin);
+  try {
+    const res = await fetch("/api/auth/pin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hash }),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    return data?.ok === true;
+  } catch {
+    return false;
+  }
 }
 
 export function isUnlocked(): boolean {
@@ -115,6 +156,11 @@ export async function registerBiometric(): Promise<boolean> {
 
 export function hasBiometric(): boolean {
   return !!localStorage.getItem(CRED_KEY);
+}
+
+/** Remove the stored biometric credential for this device (app-level only). */
+export function deleteBiometric(): void {
+  localStorage.removeItem(CRED_KEY);
 }
 
 /** Verify via platform authenticator. */
