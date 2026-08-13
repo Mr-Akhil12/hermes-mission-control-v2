@@ -75,17 +75,20 @@ export function ParticleBackground() {
       ctx.clearRect(0, 0, width, height);
 
       const dark = isDark();
-      // Light mode: brighter dots + stronger links so they pop on pale bg.
-      const dotSat = dark ? 80 : 95;
-      const dotLight = dark ? 66 : 62;
-      const dotActiveLight = dark ? 72 : 68;
-      const dotAlpha = dark ? 0.55 : 0.85;
-      const linkAlphaBase = dark ? 0.28 : 0.55;
+      // Light mode: brighter, bigger, richer dots + stronger links so they
+      // really pop on the pale bg (user: "not bright and vibrant enough").
+      const dotSat = dark ? 80 : 100;
+      const dotLight = dark ? 66 : 55;
+      const dotActiveLight = dark ? 72 : 60;
+      const dotAlpha = dark ? 0.55 : 1;
+      const dotScale = dark ? 1 : 1.5;
+      const linkAlphaBase = dark ? 0.28 : 0.7;
+      const linkWidth = dark ? 0.6 : 1;
       const linkHue = dark ? "124,108,255" : "91,76,240";
 
       // Connection lines (short links) — draw before dots
       const linkDist = 110;
-      ctx.lineWidth = 0.6;
+      ctx.lineWidth = linkWidth;
       for (let i = 0; i < particles.length; i++) {
         for (let j = i + 1; j < particles.length; j++) {
           const a = particles[i];
@@ -129,7 +132,7 @@ export function ParticleBackground() {
         }
 
         ctx.beginPath();
-        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, p.r * dotScale, 0, Math.PI * 2);
         ctx.fillStyle = `hsla(${p.hue}, ${dotSat}%, ${MOUSE.active ? dotActiveLight : dotLight}%, ${dotAlpha})`;
         ctx.fill();
       }
