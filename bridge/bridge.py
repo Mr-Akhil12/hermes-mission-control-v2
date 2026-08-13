@@ -336,6 +336,11 @@ def generate_brief() -> None:
         brief["attention"] = [{"type": "failed_cron", "name": j.get("name"), "id": j.get("id")} for j in failed]
         brief["one_thing"] = f"Review {len(failed)} failed cron(s)" if failed else None
 
+    write_brief(brief)
+
+
+def write_brief(brief: dict) -> None:
+    """Persist a brief dict to Turso `briefs` (id = date)."""
     if turso_enabled():
         turso_execute(
             "INSERT INTO briefs (id, date, content, created_at) VALUES (?, ?, ?, ?) "
@@ -352,6 +357,26 @@ def generate_brief() -> None:
         log(f"local-only mode — brief would be: {json.dumps(brief)[:200]}")
 
 
+def brief_write_from_file(path: str) -> None:
+    """Read an AI-composed brief JSON file and persist it (cron agent path)."""
+    p = Path(path)
+    if not p.exists():
+        log(f"brief-write: file not found: {path}")
+        sys.exit(1)
+    try:
+        brief = json.loads(p.read_text())
+    except Exception as e:
+        log(f"brief-write: invalid JSON: {e}")
+        sys.exit(1)
+    # Normalize shape so the home page never crashes on missing keys.
+    brief.setdefault("attention", [])
+    brief.setdefault("shipped", [])
+    brief.setdefault("next_actions", [])
+    brief.setdefault("one_thing", None)
+    write_brief(brief)
+    log(f"brief-write: persisted {len(brief['attention'])} attention, {len(brief['shipped'])} shipped, {len(brief['next_actions'])} next_actions")
+
+
 # ── Main ──────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -360,6 +385,8 @@ def main() -> None:
         mirror_state()
     elif mode == "brief":
         generate_brief()
+    elif mode == "brief-write":
+        brief_write_from_file(sys.argv[2] if len(sys.argv) > 2 else "")
     elif mode == "poll-once":
         poll_tasks(once=True)
     elif mode == "loop":

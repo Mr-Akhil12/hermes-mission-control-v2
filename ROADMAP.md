@@ -140,7 +140,7 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 
 ### Phase 4 — Powerhouse (the upgrade loop)
 - [ ] **Voice-first mode** — full Jarvis: wake word, continuous listening
-- [ ] **AI daily brief** — Hermes writes the morning brief, not template
+- [x] **AI daily brief** — Hermes writes the morning brief, not template (13 Aug): cron agent gathers real state (cron health, approvals, git log, content), composes a chief-of-staff brief (one_thing + attention + shipped + next_actions), persists via `bridge.py brief-write` → Turso `briefs`. Verified live: today's brief caught copy-trade-daily-scan never-run + content shipped. Also removed 4 dead twp-deadline-*-aug2 one-shot jobs → cron health 36 jobs / 0 errors.
 - [ ] **Predictive alerts** — "cron X will fail" from drift patterns
 - [ ] **Trading automation hooks** — strategy signals → alerts (never auto-trade)
 - [ ] **Content pipeline AI** — draft → approve → schedule → post loop
