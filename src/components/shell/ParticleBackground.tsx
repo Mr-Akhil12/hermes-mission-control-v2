@@ -55,9 +55,7 @@ export function ParticleBackground() {
       canvas.style.width = `${width}px`;
       canvas.style.height = `${height}px`;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      // Light mode: denser field so the vibrancy reads clearly.
-      const density = document.documentElement.classList.contains("dark") ? 26000 : 19000;
-      const target = Math.min(Math.floor((width * height) / density), 60);
+      const target = Math.min(Math.floor((width * height) / 26000), 48);
       particles = Array.from({ length: Math.max(target, 18) }, spawn);
     };
 
@@ -77,20 +75,19 @@ export function ParticleBackground() {
       ctx.clearRect(0, 0, width, height);
 
       const dark = isDark();
-      // Light mode: luminous network — glow halos, saturated dots, strong links.
-      const dotSat = dark ? 80 : 100;
-      const dotLight = dark ? 66 : 48;
-      const dotActiveLight = dark ? 72 : 55;
-      const dotAlpha = dark ? 0.55 : 1;
-      const dotScale = dark ? 1 : 2;
-      const linkAlphaBase = dark ? 0.28 : 0.95;
-      const linkWidth = dark ? 0.6 : 1.6;
+      // Light mode matches dark-mode structure exactly (same dot size, no halo).
+      // Only: joining lines slightly more visible (opacity + a touch of weight)
+      // and dot colours brighter so they pop on the pale background.
+      const dotSat = dark ? 80 : 95;
+      const dotLight = dark ? 66 : 58;
+      const dotActiveLight = dark ? 72 : 64;
+      const dotAlpha = dark ? 0.55 : 0.7;
+      const linkAlphaBase = dark ? 0.28 : 0.5;
+      const linkWidth = dark ? 0.6 : 0.9;
       const linkHue = dark ? "124,108,255" : "91,76,240";
-      // Glow: light mode draws a soft halo so dots look luminous, not pastel.
-      const glow = dark ? 0 : 8;
 
       // Connection lines (short links) — draw before dots
-      const linkDist = dark ? 110 : 130;
+      const linkDist = 110;
       ctx.lineWidth = linkWidth;
       for (let i = 0; i < particles.length; i++) {
         for (let j = i + 1; j < particles.length; j++) {
@@ -134,16 +131,8 @@ export function ParticleBackground() {
           }
         }
 
-        // soft glow halo (light mode) so dots read luminous
-        if (glow > 0) {
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, p.r * dotScale * 2.2, 0, Math.PI * 2);
-          ctx.fillStyle = `hsla(${p.hue}, 100%, 60%, 0.25)`;
-          ctx.fill();
-        }
-
         ctx.beginPath();
-        ctx.arc(p.x, p.y, p.r * dotScale, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
         ctx.fillStyle = `hsla(${p.hue}, ${dotSat}%, ${MOUSE.active ? dotActiveLight : dotLight}%, ${dotAlpha})`;
         ctx.fill();
       }
