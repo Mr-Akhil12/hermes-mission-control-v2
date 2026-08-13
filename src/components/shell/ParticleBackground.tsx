@@ -77,19 +77,20 @@ export function ParticleBackground() {
       ctx.clearRect(0, 0, width, height);
 
       const dark = isDark();
-      // Light mode: brighter, bigger, richer dots + stronger links so they
-      // really pop on the pale bg (user: "not bright and vibrant enough").
+      // Light mode: luminous network — glow halos, saturated dots, strong links.
       const dotSat = dark ? 80 : 100;
-      const dotLight = dark ? 66 : 50;
+      const dotLight = dark ? 66 : 48;
       const dotActiveLight = dark ? 72 : 55;
       const dotAlpha = dark ? 0.55 : 1;
-      const dotScale = dark ? 1 : 1.8;
-      const linkAlphaBase = dark ? 0.28 : 0.85;
-      const linkWidth = dark ? 0.6 : 1.4;
+      const dotScale = dark ? 1 : 2;
+      const linkAlphaBase = dark ? 0.28 : 0.95;
+      const linkWidth = dark ? 0.6 : 1.6;
       const linkHue = dark ? "124,108,255" : "91,76,240";
+      // Glow: light mode draws a soft halo so dots look luminous, not pastel.
+      const glow = dark ? 0 : 8;
 
       // Connection lines (short links) — draw before dots
-      const linkDist = 110;
+      const linkDist = dark ? 110 : 130;
       ctx.lineWidth = linkWidth;
       for (let i = 0; i < particles.length; i++) {
         for (let j = i + 1; j < particles.length; j++) {
@@ -131,6 +132,14 @@ export function ParticleBackground() {
             p.x += (dx / d) * force;
             p.y += (dy / d) * force;
           }
+        }
+
+        // soft glow halo (light mode) so dots read luminous
+        if (glow > 0) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r * dotScale * 2.2, 0, Math.PI * 2);
+          ctx.fillStyle = `hsla(${p.hue}, 100%, 60%, 0.25)`;
+          ctx.fill();
         }
 
         ctx.beginPath();
