@@ -464,18 +464,27 @@ export default function ChatPage() {
         case "init":
         case "diff":
         case "memory":
-        case "platform":
-        case "restart":
-        case "update":
-        case "topup":
-        case "debug":
         case "cron":
         case "kanban":
         case "curator":
         case "skills":
         case "reload-skills":
-        case "reload-mcp": {
-          setMessages((m) => [...m, { role: "system", content: `\`/${cmd}\` needs the gateway/CLI context — it's not available in the dashboard chat yet. Use it in Discord or the CLI. (On the roadmap: full command bridge.)` }]);
+        case "reload-mcp":
+        case "topup":
+        case "insights": {
+          // Full command bridge — runs through the native dashboard's WS RPC.
+          try {
+            const res = await fetch("/api/chat/command", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ command: `/${cmd}${arg ? ` ${arg}` : ""}`, session_id: activeId ?? "" }),
+            });
+            const data = await res.json();
+            const text = data?.output ?? data?.error ?? `/${cmd}: no output`;
+            setMessages((m) => [...m, { role: "system", content: text }]);
+          } catch (e: any) {
+            setError(`/${cmd} failed: ${e?.message ?? e}`);
+          }
           return true;
         }
         case "version":
@@ -797,6 +806,9 @@ export default function ChatPage() {
     setStreamedText("");
     setLive(IDLE_LIVE);
     loadMessages(id);
+    // On mobile the sidebar fills the whole view — close it after picking
+    // so the conversation is visible. Desktop keeps it open.
+    if (window.innerWidth < 768) setSidebarOpen(false);
   }, [busy, loadMessages]);
 
   const deleteSession = useCallback(async (id: string, e: React.MouseEvent) => {
@@ -912,9 +924,12 @@ export default function ChatPage() {
 
       <div className="card flex min-h-0 flex-1 flex-col">
         <div className="flex min-h-0 flex-1">
-          {/* Conversation sidebar */}
+          {/* Conversation sidebar — full width on mobile, 224px on desktop */}
           {sidebarOpen && (
-            <div className="flex w-56 shrink-0 flex-col border-r" style={{ borderColor: "var(--card-border)" }}>
+            <div
+              className="flex w-full shrink-0 flex-col border-r md:w-56"
+              style={{ borderColor: "var(--card-border)" }}
+            >
               <div className="flex items-center justify-between px-3 py-2">
                 <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>
                   Conversations

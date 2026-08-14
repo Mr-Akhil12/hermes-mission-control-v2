@@ -14,10 +14,12 @@ Endpoints (all read-only, local files only):
 Run:  python3 bridge/state_server.py  (default port 8645)
 Tunnel: ngrok http 8645  -> set NEXT_PUBLIC_DATA_URL to that URL on Vercel.
 """
+import asyncio
 import json
 import os
 import sqlite3
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -593,6 +595,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/chat/slash":
                 self._exec_slash_command()
                 return
+            # Full command bridge — runs ANY slash command through the native
+            # dashboard's JSON-RPC WebSocket (slash.exec / command.dispatch),
+            # giving the dashboard chat the complete Hermes command surface.
+            if path == "/api/chat/command":
+                self._exec_full_command()
+                return
             if path not in ("/v1/chat/completions", "/api/chat"):
                 self._json({"error": "not found"}, 404)
                 return
@@ -639,6 +647,68 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "name": name, "output": f"/{name}: not available in this build"}, 200)
         except Exception as e:
             self._json({"error": str(e), "name": name}, 500)
+
+    def _exec_full_command(self) -> None:
+        """POST /api/chat/command — run ANY slash command via the WS bridge.
+
+        Body: {"command": "/cron list"} or {"name": "cron", "arg": "list"}
+        Uses the native dashboard's JSON-RPC WebSocket (slash.exec first,
+        command.dispatch fallback) so the full Hermes command surface works
+        from the dashboard chat.
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length else b"{}"
+            payload = json.loads(body or b"{}")
+        except Exception:
+            self._json({"error": "invalid JSON"}, 400)
+            return
+
+        raw = payload.get("command") or ""
+        name = payload.get("name") or raw.lstrip("/").split(" ", 1)[0]
+        arg = payload.get("arg") or (raw.lstrip("/").split(" ", 1)[1] if " " in raw.lstrip("/") else "")
+        session_id = payload.get("session_id") or ""
+
+        # Destructive / gateway-lifecycle commands are refused from the
+        # dashboard — they need a real terminal (Hermes blocks them from
+        # inside the gateway process tree anyway).
+        blocked = {"restart", "update", "stop", "platform", "yolo", "approvals", "debug"}
+        if name in blocked:
+            self._json({
+                "ok": True,
+                "output": f"/{name} is blocked from the dashboard chat for safety — run it in a terminal or Discord.",
+            })
+            return
+
+        try:
+            import ws_bridge
+            bridge = ws_bridge.get_bridge()
+            # Wait up to ~8s for the bridge to connect (login → ticket → WS).
+            for _ in range(16):
+                if bridge._ws is not None:
+                    break
+                time.sleep(0.5)
+            # Try slash.exec first (covers registry + worker-routed commands).
+            try:
+                result = bridge.slash_exec(f"{name} {arg}".strip(), session_id)
+                output = result.get("output") if isinstance(result, dict) else str(result)
+                if output:
+                    self._json({"ok": True, "name": name, "output": output, "via": "slash.exec"})
+                    return
+            except Exception as exc:
+                # Fall through to command.dispatch for quick/plugin commands.
+                pass
+            try:
+                result = bridge.command_dispatch(name, arg, session_id)
+                if isinstance(result, dict) and result.get("type") in ("exec", "plugin"):
+                    self._json({"ok": True, "name": name, "output": result.get("output", ""), "via": "command.dispatch"})
+                    return
+                self._json({"ok": True, "name": name, "output": json.dumps(result, default=str), "via": "command.dispatch"})
+                return
+            except Exception as exc:
+                self._json({"error": str(exc), "name": name}, 502)
+        except Exception as exc:
+            self._json({"error": str(exc), "name": name}, 500)
 
     def do_PATCH(self) -> None:
         """Forward PATCH to the Hermes API — session title updates etc."""
