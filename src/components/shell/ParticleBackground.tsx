@@ -55,7 +55,7 @@ export function ParticleBackground() {
       canvas.style.width = `${width}px`;
       canvas.style.height = `${height}px`;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      const target = Math.min(Math.floor((width * height) / 22000), 60);
+      const target = Math.min(Math.floor((width * height) / 20000), 66);
       particles = Array.from({ length: Math.max(target, 18) }, spawn);
     };
 
@@ -87,7 +87,7 @@ export function ParticleBackground() {
       const linkHue = dark ? "124,108,255" : "91,76,240";
 
       // Connection lines (short links) — draw before dots
-      const linkDist = 130;
+      const linkDist = 145;
       ctx.lineWidth = linkWidth;
       for (let i = 0; i < particles.length; i++) {
         for (let j = i + 1; j < particles.length; j++) {
