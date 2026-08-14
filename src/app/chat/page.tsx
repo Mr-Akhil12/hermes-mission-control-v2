@@ -559,6 +559,14 @@ export default function ChatPage() {
         setBusy(false);
         setStreamedText("");
         streamAbort.current = null;
+        // Reconcile against ground truth: the agent may have completed and
+        // persisted the reply even if the tail of the SSE stream was dropped
+        // (Vercel/ngrok timeouts). Reload from the server so nothing is lost.
+        try {
+          await loadMessages(activeId);
+        } catch {
+          /* best-effort */
+        }
         await loadSessions();
       }
 
@@ -572,7 +580,7 @@ export default function ChatPage() {
         }
       }
     },
-    [busy, activeId, voiceOn, loadSessions, handleSlash]
+    [busy, activeId, voiceOn, loadSessions, loadMessages, handleSlash]
   );
 
   sendRef.current = send;
