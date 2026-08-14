@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Send, Mic, MicOff, Volume2, MessageSquare, Plus, ChevronLeft, ChevronRight,
-  Loader2, Trash2, Pencil,
+  Loader2, Trash2, Pencil, Square,
 } from "lucide-react";
 import type { ChatMsg, ChatSettings, SessionMeta, StreamEvent, ToolEvent, RunStats } from "@/lib/chat-types";
 import { MessageBubble, MarkdownLite } from "@/components/chat/MessageBubble";
@@ -261,10 +261,54 @@ export default function ChatPage() {
           return true;
         }
         case "context":
-        case "status":
+        case "status": {
+          // Built client-side — the API has no registry executor for these,
+          // but everything they'd show lives in state we already hold.
+          const sid = activeId ?? "—";
+          const sess = sessions.find((s) => s.id === sid);
+          const lastStats = live.stats;
+          const model = lastStats?.runtime?.model ?? MODEL;
+          const provider = lastStats?.runtime?.provider ?? "";
+          if (cmd === "status") {
+            const out = [
+              "**Status**",
+              "",
+              `Session: \`${sid.slice(0, 32)}${sid.length > 32 ? "…" : ""}\``,
+              `Title: ${sess?.title || "(untitled)"}`,
+              `Messages: ${sess?.message_count ?? messages.length}`,
+              `Tool calls: ${sess?.tool_call_count ?? 0}`,
+              `Model: ${model}${provider ? ` (${provider})` : ""}`,
+              lastStats?.durationMs
+                ? `Last run: ${(lastStats.durationMs / 1000).toFixed(1)}s · ${lastStats.toolCount} tools · ${lastStats.usage?.total_tokens?.toLocaleString() ?? "—"} tokens total`
+                : "Last run: none yet this session",
+            ].join("\n");
+            setMessages((m) => [...m, { role: "system", content: out }]);
+          } else {
+            const inp = lastStats?.usage?.input_tokens ?? 0;
+            const out = lastStats?.usage?.output_tokens ?? 0;
+            const tot = lastStats?.usage?.total_tokens ?? 0;
+            const out2 = [
+              "**Context**",
+              "",
+              `Messages in session: ${sess?.message_count ?? messages.length}`,
+              `Last run input tokens: ${inp.toLocaleString()}`,
+              `Last run output tokens: ${out.toLocaleString()}`,
+              `Last run total: ${tot.toLocaleString()}`,
+              "Full per-run token data comes from the run stats footer on each reply.",
+            ].join("\n");
+            setMessages((m) => [...m, { role: "system", content: out2 }]);
+          }
+          return true;
+        }
+        case "whoami": {
+          setMessages((m) => [
+            ...m,
+            { role: "system", content: "**Access**\n\nDashboard chat runs with the full host-user agent (yolo approved). Commands: admin.\n\nProfile: default · home: ~/.hermes" },
+          ]);
+          return true;
+        }
         case "version":
         case "profile":
-        case "whoami":
         case "commands": {
           try {
             const res = await fetch("/api/chat/slash", {
@@ -285,7 +329,7 @@ export default function ChatPage() {
           return true;
       }
     },
-    [activeId, retryTarget, newConversation, loadSessions]
+    [activeId, retryTarget, newConversation, loadSessions, sessions, live]
   );
 
   // ── Send / stream ───────────────────────────────────────────────────
@@ -531,6 +575,20 @@ export default function ChatPage() {
   );
 
   sendRef.current = send;
+
+  const stopRun = useCallback(() => {
+    streamAbort.current?.abort();
+    setLive((prev) => ({
+      ...prev,
+      phase: "done",
+      stats: {
+        ...(prev.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }),
+        completedAt: Date.now(),
+        durationMs: Date.now() - (prev.stats?.startedAt ?? Date.now()),
+      },
+    }));
+    setBusy(false);
+  }, []);
 
   const toggleMic = useCallback(() => {
     if (listening) {
@@ -865,13 +923,14 @@ export default function ChatPage() {
                 style={{ borderColor: "var(--card-border)", color: "var(--text)" }}
               />
               <button
-                onClick={() => send(input)}
-                disabled={busy || !input.trim() || !activeId}
+                onClick={() => (busy ? stopRun() : send(input))}
+                disabled={!busy && (!input.trim() || !activeId)}
                 className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-white disabled:opacity-50"
-                style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-2))" }}
-                aria-label="Send"
+                style={{ background: busy ? "rgba(255,92,92,0.85)" : "linear-gradient(135deg, var(--accent), var(--accent-2))" }}
+                aria-label={busy ? "Stop" : "Send"}
+                title={busy ? "Stop this run (interrupts the agent server-side)" : "Send"}
               >
-                <Send className="h-4 w-4" />
+                {busy ? <Square className="h-4 w-4" /> : <Send className="h-4 w-4" />}
               </button>
               <button
                 onClick={() => setVoiceOn((v) => !v)}

@@ -622,7 +622,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # Hard allowlist — commands that are safe to run server-side and
         # useful in the dashboard. Everything else is refused client-side.
-        allowlist = {"help", "version", "commands", "context", "status", "profile", "whoami", "bundles", "skills"}
+        allowlist = {"help", "version", "commands", "profile", "bundles", "skills"}
         if name not in allowlist:
             self._json({"error": f"command /{name} not available in dashboard chat", "name": name}, 400)
             return
