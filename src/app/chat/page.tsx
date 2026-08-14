@@ -559,6 +559,22 @@ export default function ChatPage() {
         setBusy(false);
         setStreamedText("");
         streamAbort.current = null;
+        // Ensure the run settles to "done" even if the SSE tail (run.completed
+        // with usage/runtime) was dropped through the proxy chain — the footer
+        // should always appear with whatever stats we captured.
+        setLive((prev) =>
+          prev.phase === "error"
+            ? prev
+            : {
+                ...prev,
+                phase: "done",
+                stats: {
+                  ...(prev.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }),
+                  completedAt: Date.now(),
+                  durationMs: Date.now() - (prev.stats?.startedAt ?? Date.now()),
+                },
+              }
+        );
         // Reconcile against ground truth: the agent may have completed and
         // persisted the reply even if the tail of the SSE stream was dropped
         // (Vercel/ngrok timeouts). Reload from the server so nothing is lost.
