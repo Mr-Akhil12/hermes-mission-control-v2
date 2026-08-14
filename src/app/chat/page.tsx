@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Send, Mic, MicOff, Volume2, MessageSquare, Plus, ChevronLeft, ChevronRight,
-  Loader2, Trash2, Pencil, Square,
+  Loader2, Trash2, Pencil, Square, Maximize2, Minimize2,
 } from "lucide-react";
 import type { ChatMsg, ChatSettings, SessionMeta, StreamEvent, ToolEvent, RunStats } from "@/lib/chat-types";
 import { MessageBubble, MarkdownLite } from "@/components/chat/MessageBubble";
@@ -62,11 +62,30 @@ export default function ChatPage() {
   const streamAbort = useRef<AbortController | null>(null);
   const liveRef = useRef(live);
   liveRef.current = live;
+  // Per-conversation unsent draft text, preserved when navigating between chats.
+  const draftsRef = useRef<Record<string, string>>({});
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const [composerExpanded, setComposerExpanded] = useState(false);
 
   // Load display settings once.
   useEffect(() => {
     setSettings(loadSettings());
   }, []);
+
+  // Auto-resize the composer textarea to fit its content (wraps after one
+  // line, grows up to a cap). Collapses back to a single line when cleared.
+  useEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const cap = composerExpanded ? 240 : 120;
+    el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
+  }, [input, composerExpanded]);
+
+  // Restore the unsent draft for the newly active conversation.
+  useEffect(() => {
+    if (activeId) setInput(draftsRef.current[activeId] ?? "");
+  }, [activeId]);
 
   const loadSessions = useCallback(async () => {
     try {
@@ -136,6 +155,7 @@ export default function ChatPage() {
       const data = await res.json();
       const id = data?.session?.id ?? data?.session_id ?? data?.data?.id;
       if (!id) throw new Error("No session id returned");
+      if (activeId) draftsRef.current[activeId] = input;
       setActiveId(id);
       setMessages([]);
       setStreamedText("");
@@ -145,7 +165,7 @@ export default function ChatPage() {
     } finally {
       setBusy(false);
     }
-  }, [loadSessions]);
+  }, [loadSessions, activeId, input]);
 
   // ── Slash command handling ──────────────────────────────────────────
   const sendRef = useRef<((text: string) => Promise<void>) | null>(null);
@@ -523,11 +543,13 @@ export default function ChatPage() {
       if (trimmed.startsWith("/")) {
         const handled = await handleSlash(trimmed);
         if (handled) {
+          if (activeId) draftsRef.current[activeId] = "";
           setInput("");
           return;
         }
       }
 
+      if (activeId) draftsRef.current[activeId] = "";
       setInput("");
       setRetryTarget(trimmed);
       setMessages((m) => [...m, { role: "user", content: trimmed }]);
@@ -802,6 +824,8 @@ export default function ChatPage() {
 
   const selectSession = useCallback((id: string) => {
     if (busy) return;
+    // Preserve the unsent draft of the conversation we're leaving.
+    if (activeId) draftsRef.current[activeId] = input;
     setActiveId(id);
     setMessages([]);
     setStreamedText("");
@@ -811,12 +835,13 @@ export default function ChatPage() {
     // On mobile the sidebar fills the whole view — close it after picking
     // so the conversation is visible. Desktop keeps it open.
     if (window.innerWidth < 768) setSidebarOpen(false);
-  }, [busy, loadMessages]);
+  }, [busy, loadMessages, activeId, input]);
 
   const deleteSession = useCallback(async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     try {
       await fetch(`/api/chat/sessions/${id}`, { method: "DELETE" });
+      delete draftsRef.current[id];
       const list = await loadSessions();
       if (id === activeId) {
         if (list.length > 0) {
@@ -1133,7 +1158,7 @@ export default function ChatPage() {
             )}
 
             {/* Composer */}
-            <div className="relative flex items-center gap-2 border-t p-3" style={{ borderColor: "var(--card-border)" }}>
+            <div className="relative flex items-end gap-2 border-t p-3" style={{ borderColor: "var(--card-border)" }}>
               <SlashAutocomplete
                 input={input}
                 onApply={(next) => setInput(next)}
@@ -1151,15 +1176,33 @@ export default function ChatPage() {
                   Listening…
                 </span>
               )}
-              <input
+              <textarea
+                ref={composerRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") send(input); }}
+                onKeyDown={(e) => {
+                  // Enter sends; Shift+Enter inserts a newline.
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    send(input);
+                  }
+                }}
+                rows={1}
                 placeholder={activeId ? "Message Hermes…  (type / for commands)" : "Start a new conversation first…"}
                 disabled={!activeId || busy}
-                className="min-w-0 flex-1 rounded-lg border bg-transparent px-3 py-2 text-sm outline-none disabled:opacity-50"
-                style={{ borderColor: "var(--card-border)", color: "var(--text)" }}
+                className="min-w-0 flex-1 resize-none overflow-y-auto rounded-lg border bg-transparent px-3 py-2 text-sm leading-relaxed outline-none disabled:opacity-50"
+                style={{ borderColor: "var(--card-border)", color: "var(--text)", maxHeight: composerExpanded ? 240 : 120 }}
               />
+              <button
+                onClick={() => setComposerExpanded((v) => !v)}
+                disabled={!activeId}
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border disabled:opacity-40"
+                style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}
+                aria-label={composerExpanded ? "Collapse composer" : "Expand composer"}
+                title={composerExpanded ? "Collapse composer" : "Expand composer for full typing & reading"}
+              >
+                {composerExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+              </button>
               <button
                 onClick={() => (busy ? stopRun() : send(input))}
                 disabled={!busy && (!input.trim() || !activeId)}
