@@ -260,7 +260,7 @@ export default function SettingsPage() {
             <KeyRound className="h-4 w-4" style={{ color: "var(--accent)" }} /> PIN
           </div>
           <p className="mt-1 text-xs" style={{ color: "var(--text-faint)" }}>
-            Changing the PIN updates it on every device (synced via Turso). The master PIN REDACTED always works as a fallback.
+            Changing the PIN updates it on every device (synced via Turso).
           </p>
           {!changePinOpen ? (
             <button
