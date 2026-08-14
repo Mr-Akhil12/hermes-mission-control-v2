@@ -504,6 +504,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"public_key": push.public_vapid(), "available": push.available()})
             elif path == "/api/push/status":
                 self._json({"enabled": push.available(), "subscriptions": len(push._load_subs())})
+            elif path == "/v1/models":
+                self._proxy_api_get(path)
             elif path == "/api/health":
                 self._json({"ok": True, "time": datetime.now(SAST).isoformat(), "port": PORT})
             else:
@@ -585,10 +587,84 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/content/status":
                 self._content_status()
                 return
+            # Slash command execution — runs registry-owned Hermes executors
+            # server-side (same venv as the gateway) so the dashboard chat has
+            # real /help, /version, /status-style commands, not just prompts.
+            if path == "/api/chat/slash":
+                self._exec_slash_command()
+                return
             if path not in ("/v1/chat/completions", "/api/chat"):
                 self._json({"error": "not found"}, 404)
                 return
             self._proxy_api_stream(path, stream=False)
+        except Exception as e:
+            self._json({"error": str(e)}, 502)
+
+    def _exec_slash_command(self) -> None:
+        """POST /api/chat/slash — run a slash command via hermes_cli.slash_exec.
+
+        Body: {"command": "/version"} or {"name": "version", "arg": ""}
+        Only informational/registry-owned commands execute here; interactive
+        commands (/model, /new) are handled client-side against the API.
+        """
+        import sys as _sys
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length else b"{}"
+            payload = json.loads(body or b"{}")
+        except Exception:
+            self._json({"error": "invalid JSON"}, 400)
+            return
+
+        raw = payload.get("command") or ""
+        name = (payload.get("name") or raw.lstrip("/").split()[0] if isinstance(payload.get("name"), str) else "") or raw.lstrip("/").split(" ", 1)[0]
+        arg = payload.get("arg") or (raw.lstrip("/").split(" ", 1)[1] if " " in raw.lstrip("/") else "")
+
+        # Hard allowlist — commands that are safe to run server-side and
+        # useful in the dashboard. Everything else is refused client-side.
+        allowlist = {"help", "version", "commands", "context", "status", "profile", "whoami", "bundles", "skills"}
+        if name not in allowlist:
+            self._json({"error": f"command /{name} not available in dashboard chat", "name": name}, 400)
+            return
+
+        try:
+            agent_root = os.path.expanduser("~/.hermes/hermes-agent")
+            if agent_root not in _sys.path:
+                _sys.path.insert(0, agent_root)
+            from hermes_cli.slash_exec import CommandContext, execute_command
+            reply = execute_command(name, CommandContext(surface="gateway", options={"page_size": 40}))
+            text = reply.text if hasattr(reply, "text") else str(reply)
+            self._json({"ok": True, "name": name, "output": text})
+        except LookupError:
+            self._json({"ok": True, "name": name, "output": f"/{name}: not available in this build"}, 200)
+        except Exception as e:
+            self._json({"error": str(e), "name": name}, 500)
+
+    def do_PATCH(self) -> None:
+        """Forward PATCH to the Hermes API — session title updates etc."""
+        try:
+            path = self.path.split("?")[0]
+            if path.startswith("/api/sessions"):
+                import urllib.request as u
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length) if length else b"{}"
+                api = os.environ.get("HERMES_API_URL", "http://127.0.0.1:8642")
+                api_key = os.environ.get("API_SERVER_KEY", "")
+                headers = {"Content-Type": "application/json"}
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                req = u.Request(f"{api}{self.path}", data=body, headers=headers, method="PATCH")
+                with u.urlopen(req, timeout=30) as resp:
+                    data = resp.read()
+                    ctype = resp.headers.get("Content-Type", "application/json")
+                self.send_response(resp.status)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            self._json({"error": "not found"}, 404)
         except Exception as e:
             self._json({"error": str(e)}, 502)
 

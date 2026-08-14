@@ -1,15 +1,46 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Send, Mic, MicOff, Volume2, Loader2, MessageSquare, Plus, ChevronLeft, ChevronRight, Brain,
+  Send, Mic, MicOff, Volume2, MessageSquare, Plus, ChevronLeft, ChevronRight,
+  Loader2, Trash2, Pencil,
 } from "lucide-react";
+import type { ChatMsg, ChatSettings, SessionMeta, StreamEvent, ToolEvent, RunStats } from "@/lib/chat-types";
+import { MessageBubble, MarkdownLite } from "@/components/chat/MessageBubble";
+import { ChatSettingsButton, DEFAULT_SETTINGS, loadSettings } from "@/components/chat/ChatSettings";
+import { SlashAutocomplete } from "@/components/chat/SlashAutocomplete";
+import { PhaseBanner, RunStatsFooter, type RunPhase } from "@/components/chat/RunStatus";
+import { MessageSkeleton, SessionListSkeleton } from "@/components/chat/Skeleton";
 
-type ChatMsg = { role: "user" | "assistant"; content: string; reasoning?: string | null };
-type SessionMeta = { id: string; title?: string | null; message_count?: number; last_message?: string | null };
+const MODEL = "deepseek-v4-flash:0731";
+
+type LiveState = {
+  phase: RunPhase;
+  reasoning: string;
+  tools: ToolEvent[];
+  stats: RunStats | null;
+  // tool call accounting for the current run
+  toolCount: number;
+  failedCount: number;
+};
+
+const IDLE_LIVE: LiveState = {
+  phase: "idle",
+  reasoning: "",
+  tools: [],
+  stats: null,
+  toolCount: 0,
+  failedCount: 0,
+};
+
+function toolEventToRunTool(t: ToolEvent) {
+  return t;
+}
 
 export default function ChatPage() {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [messagesLoading, setMessagesLoading] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
@@ -18,10 +49,22 @@ export default function ChatPage() {
   const [voiceOn, setVoiceOn] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [thinking, setThinking] = useState<string>("");
+  const [live, setLive] = useState<LiveState>(IDLE_LIVE);
+  const [settings, setSettings] = useState<ChatSettings>(DEFAULT_SETTINGS);
+  const [streamedText, setStreamedText] = useState("");
+  const [retryTarget, setRetryTarget] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState<string | null>(null);
+  const [titleDraft, setTitleDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
   const streamAbort = useRef<AbortController | null>(null);
+  const liveRef = useRef(live);
+  liveRef.current = live;
+
+  // Load display settings once.
+  useEffect(() => {
+    setSettings(loadSettings());
+  }, []);
 
   const loadSessions = useCallback(async () => {
     try {
@@ -33,16 +76,19 @@ export default function ChatPage() {
     } catch (e) {
       setError(`Failed to load conversations: ${e instanceof Error ? e.message : e}`);
       return [];
+    } finally {
+      setSessionsLoading(false);
     }
   }, []);
 
   const loadMessages = useCallback(async (id: string) => {
+    setMessagesLoading(true);
     try {
       const res = await fetch(`/api/chat/sessions/${id}/messages`, { cache: "no-store" });
       const data = await res.json();
       const list = data?.data ?? [];
       const msgs: ChatMsg[] = list
-        .filter((m: any) => m.role === "user" || m.role === "assistant")
+        .filter((m: any) => ["user", "assistant", "system"].includes(m.role))
         .map((m: any) => ({
           role: m.role,
           content: m.content ?? "",
@@ -51,6 +97,8 @@ export default function ChatPage() {
       setMessages(msgs);
     } catch (e) {
       setError(`Failed to load messages: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setMessagesLoading(false);
     }
   }, []);
 
@@ -59,17 +107,24 @@ export default function ChatPage() {
       if (list.length > 0) {
         setActiveId(list[0].id);
         loadMessages(list[0].id);
+      } else {
+        setMessagesLoading(false);
       }
     });
   }, [loadSessions, loadMessages]);
 
+  const scrollToBottom = useCallback(() => {
+    bottomRef.current?.scrollIntoView({ behavior: settings.autoScroll ? "smooth" : "auto" });
+  }, [settings.autoScroll]);
+
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, busy, thinking]);
+    scrollToBottom();
+  }, [messages, busy, live, streamedText, scrollToBottom]);
 
   const newConversation = useCallback(async () => {
     setBusy(true);
     setError(null);
+    setLive(IDLE_LIVE);
     try {
       const res = await fetch("/api/chat/sessions", {
         method: "POST",
@@ -77,11 +132,11 @@ export default function ChatPage() {
         body: JSON.stringify({}),
       });
       const data = await res.json();
-      const id = data?.session?.id ?? data?.session_id;
+      const id = data?.session?.id ?? data?.session_id ?? data?.data?.id;
       if (!id) throw new Error("No session id returned");
       setActiveId(id);
       setMessages([]);
-      setThinking("");
+      setStreamedText("");
       await loadSessions();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -90,88 +145,376 @@ export default function ChatPage() {
     }
   }, [loadSessions]);
 
-  const send = useCallback(async (text: string) => {
-    const trimmed = text.trim();
-    if (!trimmed || busy || !activeId) return;
-    setInput("");
-    setMessages((m) => [...m, { role: "user", content: trimmed }]);
-    setBusy(true);
-    setError(null);
-    setThinking("");
+  // ── Slash command handling ──────────────────────────────────────────
+  const sendRef = useRef<((text: string) => Promise<void>) | null>(null);
+  const handleSlash = useCallback(
+    async (raw: string): Promise<boolean> => {
+      const trimmed = raw.trim();
+      if (!trimmed.startsWith("/")) return false;
+      const [cmdRaw, ...rest] = trimmed.slice(1).split(" ");
+      const cmd = cmdRaw.toLowerCase();
+      const arg = rest.join(" ").trim();
 
-    const abort = new AbortController();
-    streamAbort.current = abort;
+      switch (cmd) {
+        case "new":
+          await newConversation();
+          return true;
+        case "help": {
+          const out = [
+            "**Dashboard chat commands**",
+            "",
+            "`/new` — start a new conversation",
+            "`/retry` — re-run the last message",
+            "`/title <name>` — rename this conversation",
+            "`/fork [name]` — branch this conversation",
+            "`/model <name>` — switch the session model",
+            "`/context` — context & token usage",
+            "`/status` — session / model status",
+            "`/version` — Hermes Agent version",
+            "`/profile` — active profile",
+            "`/whoami` — command access level",
+            "`/help` — this list",
+          ].join("\n");
+          setMessages((m) => [...m, { role: "system", content: out }]);
+          return true;
+        }
+        case "retry": {
+          if (!retryTarget) {
+            setMessages((m) => [...m, { role: "system", content: "Nothing to retry yet." }]);
+            return true;
+          }
+          if (sendRef.current) await sendRef.current(retryTarget);
+          return true;
+        }
+        case "title": {
+          if (!activeId) return true;
+          const name = arg || "Untitled";
+          try {
+            await fetch(`/api/chat/sessions/${activeId}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ title: name }),
+            });
+            setMessages((m) => [...m, { role: "system", content: `Renamed conversation to “${name}”.` }]);
+            await loadSessions();
+          } catch (e: any) {
+            setError(`Rename failed: ${e?.message ?? e}`);
+          }
+          return true;
+        }
+        case "fork": {
+          if (!activeId) return true;
+          try {
+            const res = await fetch(`/api/chat/sessions/${activeId}/fork`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(arg ? { title: arg } : {}),
+              cache: "no-store",
+            });
+            const data = await res.json();
+            const newId = data?.session?.id ?? data?.session_id ?? data?.id;
+            if (!res.ok || !newId) {
+              throw new Error(data?.error?.message ?? `fork failed (${res.status})`);
+            }
+            setActiveId(newId);
+            setMessages([]);
+            setStreamedText("");
+            await loadSessions();
+            await loadMessages(newId);
+            setMessages((m) => [
+              ...m,
+              {
+                role: "system",
+                content: `Forked a new conversation${arg ? ` named “${arg}”` : ""}. Branch explores a fresh path; the original stays intact.`,
+              },
+            ]);
+          } catch (e: any) {
+            setError(`Fork failed: ${e?.message ?? e}`);
+          }
+          return true;
+        }
+        case "model": {
+          if (!activeId) return true;
+          if (!arg) {
+            setMessages((m) => [...m, { role: "system", content: "Usage: `/model <name>` — e.g. `/model deepseek-v4-flash:0731`. Model locks the session (runtime verified server-side)." }]);
+            return true;
+          }
+          try {
+            const res = await fetch(`/api/chat/sessions/${activeId}/model`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ model: arg, require_model_lock: false }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data?.error?.message ?? `model lock failed (${res.status})`);
+            const rt = data?.runtime;
+            setMessages((m) => [
+              ...m,
+              {
+                role: "system",
+                content: `Model set: **${rt?.model ?? arg}**${rt?.provider ? ` via ${rt.provider}` : ""} (route: ${rt?.route_source ?? "global"}).`,
+              },
+            ]);
+          } catch (e: any) {
+            setError(`Model switch failed: ${e?.message ?? e}`);
+          }
+          return true;
+        }
+        case "context":
+        case "status":
+        case "version":
+        case "profile":
+        case "whoami":
+        case "commands": {
+          try {
+            const res = await fetch("/api/chat/slash", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ command: `/${cmd}${arg ? ` ${arg}` : ""}` }),
+            });
+            const data = await res.json();
+            const text = data?.output ?? data?.error ?? `/${cmd}: no output`;
+            setMessages((m) => [...m, { role: "system", content: text }]);
+          } catch (e: any) {
+            setError(`/${cmd} failed: ${e?.message ?? e}`);
+          }
+          return true;
+        }
+        default:
+          setMessages((m) => [...m, { role: "system", content: `Unknown command \`/${cmd}\`. Try \`/help\` for the list.` }]);
+          return true;
+      }
+    },
+    [activeId, retryTarget, newConversation, loadSessions]
+  );
 
-    try {
-      const res = await fetch(`/api/chat/sessions/${activeId}/stream`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmed, model: "deepseek-v4-flash:0731" }),
-        signal: abort.signal,
-      });
-      if (!res.ok || !res.body) {
-        const text = await res.text().catch(() => "");
-        throw new Error(text || `Chat failed (${res.status})`);
+  // ── Send / stream ───────────────────────────────────────────────────
+  const send = useCallback(
+    async (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed || busy || !activeId) return;
+
+      // Slash commands are handled locally (server-backed for info commands).
+      if (trimmed.startsWith("/")) {
+        const handled = await handleSlash(trimmed);
+        if (handled) {
+          setInput("");
+          return;
+        }
       }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let full = "";
+      setInput("");
+      setRetryTarget(trimmed);
+      setMessages((m) => [...m, { role: "user", content: trimmed }]);
+      setBusy(true);
+      setError(null);
+      setLive({
+        phase: "initializing",
+        reasoning: "",
+        tools: [],
+        stats: { toolCount: 0, failedTools: 0, startedAt: Date.now(), usage: null, runtime: null },
+        toolCount: 0,
+        failedCount: 0,
+      });
+      setStreamedText("");
+
+      const abort = new AbortController();
+      streamAbort.current = abort;
+
       let reasoning = "";
+      let toolCount = 0;
+      let failedCount = 0;
+      let toolEvents: ToolEvent[] = [];
+      let full = "";
+      let runUsage: RunStats["usage"] = null;
+      let runRuntime: RunStats["runtime"] = null;
+      let startedAt = Date.now();
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+      const bumpLive = (patch: Partial<LiveState>) => {
+        setLive((prev) => ({ ...prev, ...patch }));
+      };
 
-        // SSE frames are separated by \n\n
-        const frames = buffer.split("\n\n");
-        buffer = frames.pop() ?? "";
+      try {
+        const res = await fetch(`/api/chat/sessions/${activeId}/stream`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: trimmed, model: MODEL }),
+          signal: abort.signal,
+        });
+        if (!res.ok || !res.body) {
+          const text = await res.text().catch(() => "");
+          throw new Error(text || `Chat failed (${res.status})`);
+        }
 
-        for (const frame of frames) {
-          const lines = frame.split("\n");
-          const eventLine = lines.find((l) => l.startsWith("event:"));
-          const dataLine = lines.find((l) => l.startsWith("data:"));
-          if (!dataLine) continue;
-          const event = eventLine?.slice(6).trim() ?? "message";
-          const payload = JSON.parse(dataLine.slice(5).trim());
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
 
-          if (event === "assistant.delta") {
-            const delta = payload.delta ?? "";
-            full += delta;
-            setMessages((m) => {
-              const copy = [...m];
-              const last = copy[copy.length - 1];
-              if (last?.role === "assistant") {
-                copy[copy.length - 1] = { ...last, content: last.content + delta };
-              } else {
-                copy.push({ role: "assistant", content: delta });
-              }
-              return copy;
-            });
-          } else if (event === "tool.progress" && payload.tool_name === "_thinking") {
-            const delta = payload.delta ?? "";
-            reasoning += delta;
-            setThinking(reasoning);
-          } else if (event === "assistant.completed") {
-            if (payload.content) {
-              setMessages((m) => {
-                const copy = [...m];
-                const last = copy[copy.length - 1];
-                if (last?.role === "assistant") {
-                  copy[copy.length - 1] = { ...last, content: payload.content, reasoning: reasoning || null };
-                } else {
-                  copy.push({ role: "assistant", content: payload.content, reasoning: reasoning || null });
-                }
-                return copy;
-              });
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const frames = buffer.split("\n\n");
+          buffer = frames.pop() ?? "";
+
+          for (const frame of frames) {
+            const lines = frame.split("\n");
+            const eventLine = lines.find((l) => l.startsWith("event:"));
+            const dataLine = lines.find((l) => l.startsWith("data:"));
+            if (!dataLine) continue;
+            const event = (eventLine?.slice(6).trim() ?? "message") as string;
+            let payload: StreamEvent;
+            try {
+              payload = JSON.parse(dataLine.slice(5).trim());
+            } catch {
+              continue;
             }
-            setThinking("");
-          } else if (event === "error") {
-            throw new Error(payload?.error ?? "Stream error");
+
+            switch (payload.event) {
+              case "run.started": {
+                runRuntime = (payload as any).runtime ?? null;
+                bumpLive({ phase: "initializing", stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), runtime: runRuntime } });
+                // brief "initializing" beat then move to thinking as events flow
+                break;
+              }
+              case "message.started": {
+                bumpLive({ phase: "thinking" });
+                break;
+              }
+              case "assistant.delta": {
+                const delta = (payload as any).delta ?? "";
+                if (delta) {
+                  full += delta;
+                  setStreamedText(full);
+                  // Once tokens flow, phase is streaming unless tools pending.
+                  if (liveRef.current.phase !== "tools") bumpLive({ phase: "streaming" });
+                  setMessages((m) => {
+                    const copy = [...m];
+                    const last = copy[copy.length - 1];
+                    if (last?.role === "assistant") {
+                      copy[copy.length - 1] = { ...last, content: last.content + delta };
+                    } else {
+                      copy.push({ role: "assistant", content: delta });
+                    }
+                    return copy;
+                  });
+                }
+                break;
+              }
+              case "tool.progress": {
+                const tname = (payload as any).tool_name ?? "_thinking";
+                const delta = (payload as any).delta ?? "";
+                if (tname === "_thinking") {
+                  if (delta) {
+                    reasoning += delta;
+                    bumpLive({ reasoning, phase: liveRef.current.phase === "initializing" ? "thinking" : liveRef.current.phase });
+                  }
+                } else {
+                  // Real tool activity: register the tool + phase.
+                  const exists = toolEvents.find((t) => t.name === tname && t.durationMs === undefined);
+                  if (!exists) {
+                    toolEvents = [...toolEvents, { name: tname, startedAt: Date.now() }];
+                    toolCount += 1;
+                    bumpLive({ tools: toolEvents, toolCount, phase: "tools", stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
+                  }
+                }
+                break;
+              }
+              case "tool.started": {
+                const tname = (payload as any).tool_name ?? "tool";
+                if (tname === "_thinking") break;
+                const exists = toolEvents.find((t) => t.name === tname && t.durationMs === undefined);
+                if (!exists) {
+                  toolEvents = [...toolEvents, { name: tname, startedAt: Date.now(), preview: (payload as any).preview ?? undefined }];
+                  toolCount += 1;
+                } else {
+                  toolEvents = toolEvents.map((t) => (t === exists ? { ...t, preview: (payload as any).preview ?? t.preview } : t));
+                }
+                bumpLive({ tools: toolEvents, toolCount, phase: "tools", stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
+                break;
+              }
+              case "tool.completed": {
+                const tname = (payload as any).tool_name ?? "tool";
+                const isErr = !!(payload as any).is_error;
+                const durMs = (payload as any).duration !== undefined ? (payload as any).duration * 1000 : Date.now() - (toolEvents.find((t) => t.name === tname)?.startedAt ?? Date.now());
+                toolEvents = toolEvents.map((t) =>
+                  t.name === tname && t.durationMs === undefined
+                    ? { ...t, durationMs: durMs, error: isErr }
+                    : t
+                );
+                if (isErr) failedCount += 1;
+                bumpLive({ tools: toolEvents, failedCount, stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
+                break;
+              }
+              case "tool.failed": {
+                const tname = (payload as any).tool_name ?? "tool";
+                toolEvents = toolEvents.map((t) =>
+                  t.name === tname && t.durationMs === undefined
+                    ? { ...t, durationMs: Date.now() - t.startedAt, error: true }
+                    : t
+                );
+                failedCount += 1;
+                bumpLive({ tools: toolEvents, failedCount, stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
+                break;
+              }
+              case "assistant.completed": {
+                const content = (payload as any).content;
+                if (content) {
+                  full = content;
+                  setStreamedText(content);
+                  setMessages((m) => {
+                    const copy = [...m];
+                    const last = copy[copy.length - 1];
+                    if (last?.role === "assistant") {
+                      copy[copy.length - 1] = { ...last, content, reasoning: reasoning || null };
+                    } else {
+                      copy.push({ role: "assistant", content, reasoning: reasoning || null });
+                    }
+                    return copy;
+                  });
+                }
+                runRuntime = (payload as any).runtime ?? runRuntime;
+                bumpLive({ phase: "streaming", stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), runtime: runRuntime } });
+                break;
+              }
+              case "run.completed": {
+                runUsage = (payload as any).usage ?? null;
+                runRuntime = (payload as any).runtime ?? runRuntime;
+                const completedAt = Date.now();
+                bumpLive({
+                  phase: "done",
+                  stats: {
+                    toolCount,
+                    failedTools: failedCount,
+                    startedAt,
+                    completedAt,
+                    durationMs: completedAt - startedAt,
+                    usage: runUsage,
+                    runtime: runRuntime,
+                  },
+                });
+                break;
+              }
+              case "done": {
+                break;
+              }
+              case "error": {
+                throw new Error((payload as any).error ?? (payload as any).message ?? "Stream error");
+              }
+            }
           }
         }
+      } catch (e: any) {
+        if (e?.name !== "AbortError") {
+          setError(e instanceof Error ? e.message : String(e));
+          setLive((prev) => ({ ...prev, phase: "error" }));
+        }
+      } finally {
+        setBusy(false);
+        setStreamedText("");
+        streamAbort.current = null;
+        await loadSessions();
       }
 
       if (voiceOn && full) {
@@ -179,19 +522,15 @@ export default function ChatPage() {
           const synth = window.speechSynthesis;
           const utter = new SpeechSynthesisUtterance(full.replace(/[#*`>]/g, "").slice(0, 400));
           synth.speak(utter);
-        } catch { /* TTS unavailable */ }
+        } catch {
+          /* TTS unavailable */
+        }
       }
-      await loadSessions();
-    } catch (e: any) {
-      if (e?.name !== "AbortError") {
-        setError(e instanceof Error ? e.message : String(e));
-      }
-    } finally {
-      setBusy(false);
-      setThinking("");
-      streamAbort.current = null;
-    }
-  }, [busy, activeId, voiceOn, loadSessions]);
+    },
+    [busy, activeId, voiceOn, loadSessions, handleSlash]
+  );
+
+  sendRef.current = send;
 
   const toggleMic = useCallback(() => {
     if (listening) {
@@ -221,26 +560,123 @@ export default function ChatPage() {
   }, [listening, send]);
 
   const selectSession = useCallback((id: string) => {
+    if (busy) return;
     setActiveId(id);
     setMessages([]);
-    setThinking("");
+    setStreamedText("");
+    setLive(IDLE_LIVE);
     loadMessages(id);
-  }, [loadMessages]);
+  }, [busy, loadMessages]);
+
+  const deleteSession = useCallback(async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await fetch(`/api/chat/sessions/${id}`, { method: "DELETE" });
+      const list = await loadSessions();
+      if (id === activeId) {
+        if (list.length > 0) {
+          setActiveId(list[0].id);
+          loadMessages(list[0].id);
+        } else {
+          setActiveId(null);
+          setMessages([]);
+        }
+      }
+    } catch (err: any) {
+      setError(`Delete failed: ${err?.message ?? err}`);
+    }
+  }, [activeId, loadSessions, loadMessages]);
+
+  const renameSession = useCallback(
+    async (id: string, title: string) => {
+      try {
+        await fetch(`/api/chat/sessions/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title }),
+        });
+        await loadSessions();
+      } catch (err: any) {
+        setError(`Rename failed: ${err?.message ?? err}`);
+      }
+    },
+    [loadSessions]
+  );
+
+  const renderLiveContent = () => {
+    if (live.phase === "idle") return null;
+    const showReasoning =
+      live.reasoning && settings.reasoning !== "hidden";
+    const displayReasoning =
+      settings.reasoning === "partial" && live.reasoning.length > 900
+        ? live.reasoning.slice(-900)
+        : live.reasoning;
+
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-[88%] min-w-0 rounded-2xl border px-4 py-2.5 text-sm" style={{ borderColor: "var(--card-border)", background: "color-mix(in srgb, var(--bg) 60%, transparent)", color: "var(--text)" }}>
+          {showReasoning && (
+            <div className="mb-2 whitespace-pre-wrap rounded-lg border-l-2 px-2.5 py-1.5 text-xs leading-relaxed" style={{ borderLeftColor: "var(--accent)", background: "rgba(124,108,255,0.06)", color: "var(--text-dim)", maxHeight: 240, overflowY: "auto" }}>
+              {displayReasoning}
+              {settings.reasoning === "partial" && live.reasoning.length > 900 && (
+                <div className="mt-1 text-[10px] italic opacity-60">(preview mode — showing tail)</div>
+              )}
+            </div>
+          )}
+          {live.tools.length > 0 && settings.tools !== "count" && (
+            <div className="mb-2 space-y-1">
+              {live.tools.map((t, i) => (
+                <div key={`${t.name}-${i}`} className="flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs" style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}>
+                  {t.durationMs !== undefined ? (
+                    t.error ? <span style={{ color: "var(--red)" }}>✕</span> : <span style={{ color: "var(--green)" }}>✓</span>
+                  ) : (
+                    <Loader2 className="h-3 w-3 animate-spin" style={{ color: "var(--accent)" }} />
+                  )}
+                  <span className="truncate">{t.name.replace(/_/g, " ")}{t.preview ? ` — ${t.preview.slice(0, 80)}` : ""}</span>
+                  {t.durationMs !== undefined && (
+                    <span className="ml-auto font-mono text-[10px] opacity-70">{(t.durationMs / 1000).toFixed(1)}s</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {live.phase === "streaming" && streamedText && (
+            <div className="whitespace-pre-wrap break-words">
+              <MarkdownLite text={streamedText} />
+            </div>
+          )}
+          {live.phase !== "streaming" && live.phase !== "done" && (
+            <div className="flex items-center gap-2 text-xs" style={{ color: "var(--text-faint)" }}>
+              <span className="flex gap-0.5">
+                <span className="thinking-dot h-1.5 w-1.5 rounded-full bg-current" />
+                <span className="thinking-dot h-1.5 w-1.5 rounded-full bg-current" />
+                <span className="thinking-dot h-1.5 w-1.5 rounded-full bg-current" />
+              </span>
+              {live.phase === "initializing" ? "Initializing agent…" : live.phase === "thinking" ? "Thinking…" : "Working…"}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="mx-auto flex h-[calc(100vh-170px)] min-h-[480px] max-w-5xl flex-col">
-      <div className="mb-4 flex items-center justify-between">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         <h1 className="flex items-center gap-2 text-2xl font-bold">
           <MessageSquare className="h-6 w-6" style={{ color: "var(--accent)" }} /> Chat + Voice
         </h1>
-        <button
-          onClick={newConversation}
-          disabled={busy}
-          className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
-          style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-2))" }}
-        >
-          <Plus className="h-4 w-4" /> New conversation
-        </button>
+        <div className="flex items-center gap-2">
+          <ChatSettingsButton settings={settings} onChange={setSettings} />
+          <button
+            onClick={newConversation}
+            disabled={busy}
+            className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
+            style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-2))" }}
+          >
+            <Plus className="h-4 w-4" /> New conversation
+          </button>
+        </div>
       </div>
 
       <div className="card flex min-h-0 flex-1 flex-col">
@@ -262,32 +698,84 @@ export default function ChatPage() {
                 </button>
               </div>
               <div className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2">
-                {sessions.length === 0 && (
+                {sessionsLoading ? (
+                  <SessionListSkeleton />
+                ) : sessions.length === 0 ? (
                   <div className="px-2 py-4 text-xs" style={{ color: "var(--text-faint)" }}>
                     No conversations yet.
                   </div>
-                )}
-                {sessions.map((s) => (
-                  <button
-                    key={s.id}
-                    onClick={() => selectSession(s.id)}
-                    className="w-full rounded-lg px-3 py-2 text-left text-xs"
-                    style={
-                      s.id === activeId
-                        ? { background: "rgba(124,108,255,0.12)", color: "var(--text)" }
-                        : { color: "var(--text-dim)" }
-                    }
-                  >
-                    <div className="truncate font-medium">
-                      {s.title || s.last_message || s.id.slice(0, 20)}
+                ) : (
+                  sessions.map((s) => (
+                    <div
+                      key={s.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => selectSession(s.id)}
+                      onKeyDown={(e) => e.key === "Enter" && selectSession(s.id)}
+                      className="group w-full cursor-pointer rounded-lg px-3 py-2 text-left text-xs"
+                      style={
+                        s.id === activeId
+                          ? { background: "rgba(124,108,255,0.12)", color: "var(--text)" }
+                          : { color: "var(--text-dim)" }
+                      }
+                    >
+                      {editingTitle === s.id ? (
+                        <input
+                          autoFocus
+                          value={titleDraft}
+                          onChange={(e) => setTitleDraft(e.target.value)}
+                          onBlur={() => {
+                            if (titleDraft.trim()) renameSession(s.id, titleDraft.trim());
+                            setEditingTitle(null);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              if (titleDraft.trim()) renameSession(s.id, titleDraft.trim());
+                              setEditingTitle(null);
+                            }
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          className="w-full rounded border bg-transparent px-1 py-0.5 text-xs outline-none"
+                          style={{ borderColor: "var(--accent)", color: "var(--text)" }}
+                        />
+                      ) : (
+                        <>
+                          <div className="truncate font-medium">
+                            {s.title || s.last_message || s.id.slice(0, 20)}
+                          </div>
+                          <div className="mt-0.5 flex items-center gap-2 text-[10px]" style={{ color: "var(--text-faint)" }}>
+                            <span>{s.message_count ?? 0} msgs</span>
+                            {s.tool_call_count != null && <span>· {s.tool_call_count} tools</span>}
+                          </div>
+                        </>
+                      )}
+                      {editingTitle !== s.id && (
+                        <div className="absolute right-1 top-1 hidden gap-0.5 group-hover:flex">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingTitle(s.id);
+                              setTitleDraft(s.title || "");
+                            }}
+                            className="rounded p-1 hover:bg-white/10"
+                            style={{ color: "var(--text-faint)" }}
+                            aria-label="Rename"
+                          >
+                            <Pencil className="h-3 w-3" />
+                          </button>
+                          <button
+                            onClick={(e) => deleteSession(s.id, e)}
+                            className="rounded p-1 hover:bg-white/10"
+                            style={{ color: "var(--red)" }}
+                            aria-label="Delete"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
+                        </div>
+                      )}
                     </div>
-                    {s.message_count != null && (
-                      <div className="mt-0.5 text-[10px]" style={{ color: "var(--text-faint)" }}>
-                        {s.message_count} messages
-                      </div>
-                    )}
-                  </button>
-                ))}
+                  ))
+                )}
               </div>
             </div>
           )}
@@ -304,51 +792,40 @@ export default function ChatPage() {
                   <ChevronRight className="h-3 w-3" /> Conversations
                 </button>
               )}
-              {messages.length === 0 && !busy && (
-                <div className="flex h-full items-center justify-center text-sm" style={{ color: "var(--text-faint)" }}>
-                  Ask me anything — type below or tap the mic to speak.
+
+              {messagesLoading ? (
+                <MessageSkeleton />
+              ) : messages.length === 0 && !busy ? (
+                <div className="flex h-full flex-col items-center justify-center gap-2 text-sm" style={{ color: "var(--text-faint)" }}>
+                  <MessageSquare className="h-8 w-8 opacity-40" />
+                  <span>Ask me anything — type below or tap the mic to speak.</span>
+                  <span className="font-mono text-xs opacity-60">Tip: type <span style={{ color: "var(--accent)" }}>/</span> for commands</span>
                 </div>
-              )}
-              {messages.map((m, i) => (
-                <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-                  <div
-                    className="max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm"
-                    style={
-                      m.role === "user"
-                        ? { background: "linear-gradient(135deg, var(--accent), var(--accent-2))", color: "#fff" }
-                        : { background: "color-mix(in srgb, var(--bg) 60%, transparent)", color: "var(--text)", border: "1px solid var(--card-border)" }
-                    }
-                  >
-                    {m.reasoning && (
-                      <details className="mb-2">
-                        <summary className="flex cursor-pointer items-center gap-1 text-xs" style={{ color: "var(--text-faint)" }}>
-                          <Brain className="h-3 w-3" /> Thinking
-                        </summary>
-                        <div className="mt-1 whitespace-pre-wrap text-xs" style={{ color: "var(--text-dim)" }}>
-                          {m.reasoning}
-                        </div>
-                      </details>
-                    )}
-                    {m.content}
-                  </div>
-                </div>
-              ))}
-              {thinking && (
-                <div className="flex justify-start">
-                  <div className="max-w-[85%] rounded-2xl border px-4 py-2.5 text-xs" style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}>
-                    <div className="mb-1 flex items-center gap-1 font-semibold" style={{ color: "var(--text-faint)" }}>
-                      <Brain className="h-3 w-3 animate-pulse" /> Thinking…
-                    </div>
-                    <div className="whitespace-pre-wrap">{thinking.slice(-600)}</div>
-                  </div>
-                </div>
-              )}
-              {busy && !thinking && (
-                <div className="flex justify-start">
-                  <div className="flex items-center gap-2 rounded-2xl border px-4 py-2.5 text-sm" style={{ borderColor: "var(--card-border)", color: "var(--text-faint)" }}>
-                    <Loader2 className="h-4 w-4 animate-spin" /> Hermes is thinking…
-                  </div>
-                </div>
+              ) : (
+                <>
+                  {messages.map((m, i) => (
+                    <MessageBubble key={`${m.role}-${i}`} msg={m} settings={settings} />
+                  ))}
+                  {busy && <PhaseBanner phase={live.phase} toolCount={live.toolCount} />}
+                  {busy && renderLiveContent()}
+                  {busy && (
+                    <RunStatsFooter
+                      stats={{
+                        toolCount: live.toolCount,
+                        failedTools: live.failedCount,
+                        startedAt: live.stats?.startedAt ?? Date.now(),
+                        completedAt: live.stats?.completedAt,
+                        durationMs: live.stats?.durationMs,
+                        usage: live.stats?.usage,
+                        runtime: live.stats?.runtime,
+                      }}
+                      phase={live.phase}
+                    />
+                  )}
+                  {!busy && live.phase === "done" && live.stats && settings.showStats && (
+                    <RunStatsFooter stats={live.stats} phase="done" />
+                  )}
+                </>
               )}
               <div ref={bottomRef} />
             </div>
@@ -360,7 +837,11 @@ export default function ChatPage() {
             )}
 
             {/* Composer */}
-            <div className="flex items-center gap-2 border-t p-3" style={{ borderColor: "var(--card-border)" }}>
+            <div className="relative flex items-center gap-2 border-t p-3" style={{ borderColor: "var(--card-border)" }}>
+              <SlashAutocomplete
+                input={input}
+                onApply={(next) => setInput(next)}
+              />
               <button
                 onClick={toggleMic}
                 className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full"
@@ -378,8 +859,8 @@ export default function ChatPage() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") send(input); }}
-                placeholder={activeId ? "Message Hermes…" : "Start a new conversation first…"}
-                disabled={!activeId}
+                placeholder={activeId ? "Message Hermes…  (type / for commands)" : "Start a new conversation first…"}
+                disabled={!activeId || busy}
                 className="min-w-0 flex-1 rounded-lg border bg-transparent px-3 py-2 text-sm outline-none disabled:opacity-50"
                 style={{ borderColor: "var(--card-border)", color: "var(--text)" }}
               />
