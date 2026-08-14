@@ -850,11 +850,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Cache-Control", "no-cache")
             if stream:
-                # SSE: no Content-Length, chunked transfer
+                # SSE: no Content-Length, chunked transfer. Use read1() so we
+                # return whatever bytes are available RIGHT NOW instead of
+                # blocking until the 4096-byte buffer fills (read() blocks to
+                # fill amt, which buffers small SSE events until the stream
+                # ends — the "shimmer then full response" bug).
                 self.send_header("X-Accel-Buffering", "no")
                 self.end_headers()
                 while True:
-                    chunk = resp.read(4096)
+                    chunk = resp.read1(4096)
                     if not chunk:
                         break
                     self.wfile.write(chunk)
