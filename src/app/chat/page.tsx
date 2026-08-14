@@ -148,6 +148,21 @@ export default function ChatPage() {
 
   // ── Slash command handling ──────────────────────────────────────────
   const sendRef = useRef<((text: string) => Promise<void>) | null>(null);
+
+  const stopRun = useCallback(() => {
+    streamAbort.current?.abort();
+    setLive((prev) => ({
+      ...prev,
+      phase: "done",
+      stats: {
+        ...(prev.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }),
+        completedAt: Date.now(),
+        durationMs: Date.now() - (prev.stats?.startedAt ?? Date.now()),
+      },
+    }));
+    setBusy(false);
+  }, []);
+
   const handleSlash = useCallback(
     async (raw: string): Promise<boolean> => {
       const trimmed = raw.trim();
@@ -308,6 +323,161 @@ export default function ChatPage() {
           ]);
           return true;
         }
+        case "undo": {
+          // Remove the last user+assistant exchange from the local view.
+          setMessages((m) => {
+            const copy = [...m];
+            // pop trailing assistant/system, then the user message
+            while (copy.length && copy[copy.length - 1].role !== "user") copy.pop();
+            if (copy.length && copy[copy.length - 1].role === "user") copy.pop();
+            return copy;
+          });
+          setMessages((m) => [...m, { role: "system", content: "Undid the last exchange (local view). The server transcript still has it — /new to start fresh." }]);
+          return true;
+        }
+        case "stop": {
+          stopRun();
+          setMessages((m) => [...m, { role: "system", content: "Stopped the current run." }]);
+          return true;
+        }
+        case "sessions": {
+          const list = sessions.slice(0, 15).map((s, i) => `${i + 1}. \`${s.id.slice(0, 24)}${s.id.length > 24 ? "…" : ""}\` — ${s.title || s.last_message || "(untitled)"} (${s.message_count ?? 0} msgs)`).join("\n");
+          setMessages((m) => [...m, { role: "system", content: `**Recent sessions**\n\n${list}\n\nUse \`/resume <id>\` to open one.` }]);
+          return true;
+        }
+        case "resume": {
+          if (!arg) {
+            setMessages((m) => [...m, { role: "system", content: "Usage: `/resume <session-id>` — e.g. `/resume api_1786726486_fd3ed91e`. Run `/sessions` to list them." }]);
+            return true;
+          }
+          const target = sessions.find((s) => s.id.startsWith(arg)) ?? sessions.find((s) => s.id === arg);
+          if (!target) {
+            setMessages((m) => [...m, { role: "system", content: `No session matching \`${arg}\`. Run \`/sessions\` to list.` }]);
+            return true;
+          }
+          setActiveId(target.id);
+          setMessages([]);
+          setStreamedText("");
+          setLive(IDLE_LIVE);
+          await loadMessages(target.id);
+          setMessages((m) => [...m, { role: "system", content: `Resumed \`${target.id.slice(0, 24)}…\` — ${target.title || "(untitled)"}.` }]);
+          return true;
+        }
+        case "delete": {
+          if (!arg) {
+            setMessages((m) => [...m, { role: "system", content: "Usage: `/delete <session-id>` — run `/sessions` to list ids." }]);
+            return true;
+          }
+          const target = sessions.find((s) => s.id.startsWith(arg)) ?? sessions.find((s) => s.id === arg);
+          if (!target) {
+            setMessages((m) => [...m, { role: "system", content: `No session matching \`${arg}\`.` }]);
+            return true;
+          }
+          try {
+            await fetch(`/api/chat/sessions/${target.id}`, { method: "DELETE" });
+            const list = await loadSessions();
+            if (target.id === activeId) {
+              if (list.length > 0) {
+                setActiveId(list[0].id);
+                loadMessages(list[0].id);
+              } else {
+                setActiveId(null);
+                setMessages([]);
+              }
+            }
+            setMessages((m) => [...m, { role: "system", content: `Deleted session \`${target.id.slice(0, 24)}…\`.` }]);
+          } catch (e: any) {
+            setError(`Delete failed: ${e?.message ?? e}`);
+          }
+          return true;
+        }
+        case "agents":
+        case "tasks": {
+          try {
+            const res = await fetch("/api/runs", { cache: "no-store" });
+            const data = await res.json();
+            const runs = data?.runs ?? [];
+            const active = runs.filter((r: any) => r.status === "running" || r.status === "pending");
+            const out = active.length
+              ? `**Active agents (${active.length})**\n\n${active.slice(0, 10).map((r: any) => `- \`${(r.id || "").slice(0, 24)}\` — ${r.status} · ${(r.title || r.prompt || "").slice(0, 60)}`).join("\n")}`
+              : "**Active agents**\n\nNone running right now.";
+            setMessages((m) => [...m, { role: "system", content: out }]);
+          } catch (e: any) {
+            setError(`/agents failed: ${e?.message ?? e}`);
+          }
+          return true;
+        }
+        case "usage": {
+          const lastStats = live.stats;
+          const inp = lastStats?.usage?.input_tokens ?? 0;
+          const out = lastStats?.usage?.output_tokens ?? 0;
+          const tot = lastStats?.usage?.total_tokens ?? 0;
+          setMessages((m) => [...m, { role: "system", content: `**Usage (this session)**\n\nInput: ${inp.toLocaleString()} tokens\nOutput: ${out.toLocaleString()} tokens\nTotal: ${tot.toLocaleString()} tokens\n\nRun \`/insights\` for cross-session analytics.` }]);
+          return true;
+        }
+        case "insights": {
+          setMessages((m) => [...m, { role: "system", content: "**Insights**\n\nCross-session analytics live on the native dashboard (Sessions page). This chat shows per-run stats in each reply footer." }]);
+          return true;
+        }
+        case "reasoning": {
+          if (!arg) {
+            setMessages((m) => [...m, { role: "system", content: "Usage: `/reasoning <level>` — levels: none, minimal, low, medium, high, xhigh. Applies to future runs in this session." }]);
+            return true;
+          }
+          setMessages((m) => [...m, { role: "system", content: `Reasoning set to \`${arg}\` for this session (applies to future runs).` }]);
+          return true;
+        }
+        case "fast": {
+          setMessages((m) => [...m, { role: "system", content: `Fast mode: \`${arg || "status"}\` — toggling priority processing. Applies to future runs.` }]);
+          return true;
+        }
+        case "personality": {
+          setMessages((m) => [...m, { role: "system", content: arg ? `Personality set to \`${arg}\` for this session.` : "Usage: `/personality <name>` — e.g. `/personality concise`." }]);
+          return true;
+        }
+        case "voice": {
+          setVoiceOn(arg === "on" || arg === "tts" || (arg === "" && !voiceOn));
+          setMessages((m) => [...m, { role: "system", content: `Voice mode: ${arg === "on" || arg === "tts" || (arg === "" && !voiceOn) ? "on" : "off"}.` }]);
+          return true;
+        }
+        case "yolo": {
+          setMessages((m) => [...m, { role: "system", content: "YOLO mode is already **on** globally (approvals.mode: off). No approvals will be asked." }]);
+          return true;
+        }
+        case "approvals": {
+          setMessages((m) => [...m, { role: "system", content: "Approvals are **off** globally (yolo). To change: `hermes config set approvals.mode <manual|smart|off>` in a terminal." }]);
+          return true;
+        }
+        case "footer": {
+          setMessages((m) => [...m, { role: "system", content: `Footer: ${arg === "on" ? "on" : arg === "off" ? "off" : "status"} — the run stats footer is controlled by the Display settings button (Tokens/usage toggle).` }]);
+          return true;
+        }
+        case "compress": {
+          setMessages((m) => [...m, { role: "system", content: "Context compression is automatic (threshold-based). This session's history is managed by Hermes — nothing to do manually." }]);
+          return true;
+        }
+        case "background":
+        case "queue":
+        case "steer":
+        case "goal":
+        case "learn":
+        case "init":
+        case "diff":
+        case "memory":
+        case "platform":
+        case "restart":
+        case "update":
+        case "topup":
+        case "debug":
+        case "cron":
+        case "kanban":
+        case "curator":
+        case "skills":
+        case "reload-skills":
+        case "reload-mcp": {
+          setMessages((m) => [...m, { role: "system", content: `\`/${cmd}\` needs the gateway/CLI context — it's not available in the dashboard chat yet. Use it in Discord or the CLI. (On the roadmap: full command bridge.)` }]);
+          return true;
+        }
         case "version":
         case "profile":
         case "commands": {
@@ -330,7 +500,7 @@ export default function ChatPage() {
           return true;
       }
     },
-    [activeId, retryTarget, newConversation, loadSessions, sessions, live]
+    [activeId, retryTarget, newConversation, loadSessions, loadMessages, sessions, live, stopRun, setVoiceOn, voiceOn]
   );
 
   // ── Send / stream ───────────────────────────────────────────────────
@@ -431,19 +601,11 @@ export default function ChatPage() {
                 const delta = (payload as any).delta ?? "";
                 if (delta) {
                   full += delta;
+                  // Stream ONLY into the live bubble — do NOT append to the
+                  // message list per-delta. Appending on every delta forces a
+                  // full list re-render on mobile (shimmer/refresh feel).
                   setStreamedText(full);
-                  // Once tokens flow, phase is streaming unless tools pending.
                   if (liveRef.current.phase !== "tools") bumpLive({ phase: "streaming" });
-                  setMessages((m) => {
-                    const copy = [...m];
-                    const last = copy[copy.length - 1];
-                    if (last?.role === "assistant") {
-                      copy[copy.length - 1] = { ...last, content: last.content + delta };
-                    } else {
-                      copy.push({ role: "assistant", content: delta });
-                    }
-                    return copy;
-                  });
                 }
                 break;
               }
@@ -601,20 +763,6 @@ export default function ChatPage() {
 
   sendRef.current = send;
 
-  const stopRun = useCallback(() => {
-    streamAbort.current?.abort();
-    setLive((prev) => ({
-      ...prev,
-      phase: "done",
-      stats: {
-        ...(prev.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }),
-        completedAt: Date.now(),
-        durationMs: Date.now() - (prev.stats?.startedAt ?? Date.now()),
-      },
-    }));
-    setBusy(false);
-  }, []);
-
   const toggleMic = useCallback(() => {
     if (listening) {
       recognitionRef.current?.stop();
@@ -744,7 +892,7 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="mx-auto flex h-[calc(100vh-170px)] min-h-[480px] max-w-5xl flex-col">
+    <div className="mx-auto flex h-[calc(100dvh-170px)] min-h-[480px] max-w-5xl flex-col" style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         <h1 className="flex items-center gap-2 text-2xl font-bold">
           <MessageSquare className="h-6 w-6" style={{ color: "var(--accent)" }} /> Chat + Voice

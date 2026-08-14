@@ -54,6 +54,7 @@ export function ChatSettingsButton({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -64,6 +65,19 @@ export function ChatSettingsButton({
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
 
+  const toggle = () => {
+    if (!open && ref.current) {
+      const r = ref.current.getBoundingClientRect();
+      // Anchor the popup to the button's viewport position so it can never
+      // render off-screen (mobile PWA bug: absolute right-0 overflowed left).
+      setPos({
+        top: r.bottom + 8,
+        right: Math.max(8, window.innerWidth - r.right),
+      });
+    }
+    setOpen((o) => !o);
+  };
+
   const set = <K extends keyof ChatSettings>(key: K, value: ChatSettings[K]) => {
     const next = { ...settings, [key]: value };
     saveSettings(next);
@@ -73,7 +87,7 @@ export function ChatSettingsButton({
   return (
     <div ref={ref} className="relative">
       <button
-        onClick={() => setOpen((o) => !o)}
+        onClick={toggle}
         className="flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold"
         style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}
         title="Chat display settings"
@@ -83,10 +97,10 @@ export function ChatSettingsButton({
         Display
       </button>
 
-      {open && (
+      {open && pos && (
         <div
-          className="absolute right-0 top-full z-50 mt-2 w-80 rounded-xl border p-3 shadow-xl"
-          style={{ background: "var(--bg-2)", borderColor: "var(--card-border)" }}
+          className="fixed z-[60] w-80 max-w-[calc(100vw-1rem)] rounded-xl border p-3 shadow-xl"
+          style={{ top: pos.top, right: pos.right, background: "var(--bg-2)", borderColor: "var(--card-border)" }}
         >
           <div className="space-y-3">
             {/* Reasoning */}

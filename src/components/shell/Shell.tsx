@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTheme } from "next-themes";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { lockNow } from "@/lib/auth";
 import {
   LayoutDashboard,
@@ -47,8 +47,39 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const navRef = useRef<HTMLElement>(null);
+  const navTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => setMounted(true), []);
+
+  // Snap the bottom nav back to the active screen after 2.5s of no scrolling.
+  const onNavScroll = () => {
+    if (navTimer.current) clearTimeout(navTimer.current);
+    navTimer.current = setTimeout(() => {
+      const nav = navRef.current;
+      if (!nav) return;
+      const activeIdx = NAV.findIndex(
+        (item) => pathname === item.href || (item.href !== "/" && pathname.startsWith(item.href))
+      );
+      if (activeIdx < 0) return;
+      const el = nav.children[activeIdx] as HTMLElement | undefined;
+      if (!el) return;
+      nav.scrollTo({ left: el.offsetLeft - nav.clientWidth / 2 + el.clientWidth / 2, behavior: "smooth" });
+    }, 2500);
+  };
+
+  // Snap on mount / route change too (so the active tab is always centered).
+  useEffect(() => {
+    const nav = navRef.current;
+    if (!nav) return;
+    const activeIdx = NAV.findIndex(
+      (item) => pathname === item.href || (item.href !== "/" && pathname.startsWith(item.href))
+    );
+    if (activeIdx < 0) return;
+    const el = nav.children[activeIdx] as HTMLElement | undefined;
+    if (!el) return;
+    nav.scrollTo({ left: el.offsetLeft - nav.clientWidth / 2 + el.clientWidth / 2, behavior: "auto" });
+  }, [pathname]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -150,13 +181,17 @@ export function Shell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        <main className="flex-1 px-4 py-6 md:px-8">{children}</main>
+        <main className="flex-1 px-4 py-6 pb-28 md:px-8 md:pb-6" style={{ paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 5.5rem)" }}>
+          {children}
+        </main>
       </div>
 
       {/* Mobile bottom nav — horizontally scrollable, ALL pages reachable */}
       <nav
+        ref={navRef}
+        onScroll={onNavScroll}
         className="fixed bottom-0 left-0 right-0 z-40 flex items-center gap-1 overflow-x-auto border-t px-2 py-2 backdrop-blur-md md:hidden"
-        style={{ borderColor: "var(--card-border)", background: "color-mix(in srgb, var(--bg-2) 92%, transparent)", scrollbarWidth: "none" }}
+        style={{ borderColor: "var(--card-border)", background: "color-mix(in srgb, var(--bg-2) 92%, transparent)", scrollbarWidth: "none", paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 0.5rem)" }}
       >
         {NAV.map((item) => {
           const active = pathname === item.href;
