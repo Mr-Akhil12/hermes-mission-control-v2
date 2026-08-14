@@ -667,7 +667,10 @@ class Handler(BaseHTTPRequestHandler):
         raw = payload.get("command") or ""
         name = payload.get("name") or raw.lstrip("/").split(" ", 1)[0]
         arg = payload.get("arg") or (raw.lstrip("/").split(" ", 1)[1] if " " in raw.lstrip("/") else "")
-        session_id = payload.get("session_id") or ""
+        # NOTE: the client's session_id is an API-server session, which does
+        # NOT exist in the tui_gateway registry — slash.exec would reject it.
+        # The bridge keeps its own persistent tui_gateway session; use that.
+        session_id = ""
 
         # Destructive / gateway-lifecycle commands are refused from the
         # dashboard — they need a real terminal (Hermes blocks them from
