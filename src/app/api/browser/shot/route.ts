@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
-// Browser view proxy: GET /api/browser/shot
-// Returns the latest headed-browser screenshot (JPEG) from the state server
-// so the chat page can show what the agent is doing in the browser.
+// Browser view stream: GET /api/browser/shot
+// Proxies the live MJPEG stream (multipart/x-mixed-replace) from the state
+// server — the chat page <img> plays it directly, no polling, no bloat.
 const DATA_URL = process.env.NEXT_PUBLIC_DATA_URL ?? "";
 
 function apiBase() {
@@ -11,18 +11,36 @@ function apiBase() {
 
 export async function GET(_request: NextRequest) {
   try {
-    const resp = await fetch(`${apiBase()}/api/browser/shot`, {
+    const upstream = await fetch(`${apiBase()}/api/browser/shot`, {
       cache: "no-store",
     });
-    if (!resp.ok) {
-      return NextResponse.json({ error: `browser shot failed (${resp.status})` }, { status: resp.status });
+    if (!upstream.ok || !upstream.body) {
+      return NextResponse.json(
+        { error: `browser stream failed (${upstream.status})` },
+        { status: upstream.status ?? 502 }
+      );
     }
-    const buf = Buffer.from(await resp.arrayBuffer());
-    return new NextResponse(buf, {
+    // Pipe the MJPEG stream through as-is.
+    const reader = upstream.body.getReader();
+    const stream = new ReadableStream({
+      async pull(controller) {
+        const { done, value } = await reader.read();
+        if (done) {
+          controller.close();
+        } else {
+          controller.enqueue(value);
+        }
+      },
+      cancel() {
+        reader.cancel().catch(() => {});
+      },
+    });
+    return new NextResponse(stream, {
       status: 200,
       headers: {
-        "Content-Type": "image/jpeg",
-        "Cache-Control": "no-store",
+        "Content-Type": "multipart/x-mixed-replace; boundary=frame",
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "X-Accel-Buffering": "no",
       },
     });
   } catch (e) {

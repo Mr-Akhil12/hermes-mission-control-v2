@@ -17,6 +17,7 @@ Tunnel: ngrok http 8645  -> set NEXT_PUBLIC_DATA_URL to that URL on Vercel.
 import asyncio
 import json
 import os
+import queue
 import sqlite3
 import sys
 import time
@@ -717,27 +718,60 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(exc), "name": name}, 500)
 
     def _browser_shot(self) -> None:
-        """GET /api/browser/shot — latest headed-browser screenshot (JPEG)."""
+        """GET /api/browser/shot — live MJPEG stream of the headed browser.
+
+        multipart/x-mixed-replace: every CDP screencast frame is written as
+        a boundary-delimited JPEG. The browser <img> plays it directly —
+        no polling, no per-frame fetch, no bloat.
+        """
         try:
             import cdp_view
-            view = cdp_view.get_view()
-            shot, ts = view.snapshot()
-            if not shot:
-                # Try one live capture on first request
-                import asyncio as _aio
-                shot = _aio.run(cdp_view._capture_once(timeout=6))
-            if not shot:
-                self._json({"error": "browser not available"}, 503)
-                return
-            self.send_response(200)
-            self.send_header("Content-Type", "image/jpeg")
-            self.send_header("Content-Length", str(len(shot)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(shot)
+            bcast = cdp_view.get_broadcaster()
+            sid, q = bcast.subscribe()
         except Exception as e:
             self._json({"error": str(e)}, 500)
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        try:
+            # Wait up to ~8s for the first frame (browser may be cold).
+            first = None
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                try:
+                    first = q.get(timeout=1)
+                    break
+                except queue.Empty:
+                    continue
+            if not first:
+                self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: 0\r\n\r\n")
+                return
+            self._write_frame(first)
+            while True:
+                try:
+                    jpg = q.get(timeout=10)
+                    self._write_frame(jpg)
+                except queue.Empty:
+                    # keepalive comment frame so proxies don't drop the stream
+                    self.wfile.write(b"--frame\r\nContent-Type: text/plain\r\n\r\n.\r\n")
+                    self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            bcast.unsubscribe(sid)
+
+    def _write_frame(self, jpg: bytes) -> None:
+        self.wfile.write(b"--frame\r\n")
+        self.wfile.write(b"Content-Type: image/jpeg\r\n")
+        self.wfile.write(f"Content-Length: {len(jpg)}\r\n\r\n".encode())
+        self.wfile.write(jpg)
+        self.wfile.write(b"\r\n")
+        self.wfile.flush()
 
     def do_PATCH(self) -> None:
         """Forward PATCH to the Hermes API — session title updates etc."""

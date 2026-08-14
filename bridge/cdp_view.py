@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""CDP browser view proxy — captures live screenshots of the headed browser
-so the dashboard chat can show what the agent is doing in real time.
+"""CDP browser screencast broadcaster — serves the headed browser as a live
+MJPEG stream (multipart/x-mixed-replace) with zero polling.
 
-Uses the CDP HTTP endpoints (/json/list, /json/version) + WebSocket for
-Page.captureScreenshot. No external deps beyond websockets.
+Uses CDP's native Page.startScreencast (continuous JPEG frames from the
+browser) and fans each frame out to every subscribed stream client. One
+CDP connection, N viewers, no per-frame round-trips.
 """
 from __future__ import annotations
 
@@ -11,87 +12,153 @@ import asyncio
 import base64
 import json
 import logging
+import os
+import queue
 import threading
+import time
 import urllib.request
 
-log = logging.getLogger("cdp_view")
+log = logging.getLogger("cdp_stream")
 
-CDP_HTTP = "http://127.0.0.1:9222"
-
-
-def _list_pages() -> list[dict]:
-    with urllib.request.urlopen(f"{CDP_HTTP}/json/list", timeout=5) as r:
-        return json.loads(r.read())
+CDP_HTTP = os.environ.get("BROWSER_CDP_URL", "http://127.0.0.1:9222").replace("ws://", "http://")
+_CDP_WS = os.environ.get("BROWSER_CDP_WS", "")
 
 
-def find_page_url() -> str:
+def _page_ws_url() -> str:
     """Return the first page tab's webSocketDebuggerUrl."""
-    for tab in _list_pages():
+    if _CDP_WS:
+        return _CDP_WS
+    with urllib.request.urlopen(f"{CDP_HTTP}/json/list", timeout=5) as r:
+        tabs = json.loads(r.read())
+    for tab in tabs:
         if tab.get("type") == "page":
             return tab.get("webSocketDebuggerUrl", "")
     return ""
 
 
-async def _capture_once(timeout: float = 8.0) -> bytes | None:
-    import websockets
-    ws_url = find_page_url()
-    if not ws_url:
-        return None
-    async with websockets.connect(ws_url, open_timeout=5, max_size=50 * 1024 * 1024) as ws:
-        await ws.send(json.dumps({"id": 1, "method": "Page.captureScreenshot", "params": {"format": "jpeg", "quality": 70}}))
-        while True:
-            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
-            if frame.get("id") == 1:
-                data = frame.get("result", {}).get("data")
-                if data:
-                    return base64.b64decode(data)
-                return None
-
-
-class CdpView:
-    """Thread-safe screenshot capture wrapper."""
+class ScreencastBroadcaster:
+    """Background asyncio thread: CDP screencast -> per-subscriber queues."""
 
     def __init__(self) -> None:
-        self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
+        self._subs: dict[int, queue.Queue] = {}
+        self._next_id = 0
         self._lock = threading.Lock()
-        self._latest: bytes | None = None
-        self._latest_ts: float = 0.0
         self._stop = threading.Event()
+        self._latest: bytes | None = None
+        self._active = False
 
+    # ── lifecycle ──────────────────────────────────────────────────────
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True, name="cdp-view")
+        self._thread = threading.Thread(target=self._run, daemon=True, name="cdp-screencast")
         self._thread.start()
 
     def _run(self) -> None:
-        import time
+        asyncio.run(self._main())
+
+    async def _main(self) -> None:
+        import websockets
         while not self._stop.is_set():
             try:
-                shot = asyncio.run(_capture_once(timeout=8))
-                if shot:
-                    with self._lock:
-                        self._latest = shot
-                        self._latest_ts = time.time()
+                ws_url = _page_ws_url()
+                if not ws_url:
+                    await asyncio.sleep(2)
+                    continue
+                async with websockets.connect(ws_url, open_timeout=5, max_size=50 * 1024 * 1024) as ws:
+                    await ws.send(json.dumps({"id": 1, "method": "Page.enable", "params": {}}))
+                    await ws.send(json.dumps({
+                        "id": 2,
+                        "method": "Page.startScreencast",
+                        # lighter frames: smaller canvas, lower quality,
+                        # everyNthFrame 3 — keeps the stream lean on mobile.
+                        "params": {"format": "jpeg", "quality": 45, "maxWidth": 720, "everyNthFrame": 3},
+                    }))
+                    self._set_active(True)
+                    log.info("screencast started")
+                    ack_id = 100
+                    while not self._stop.is_set():
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=15)
+                        except asyncio.TimeoutError:
+                            continue
+                        except Exception:
+                            break
+                        try:
+                            obj = json.loads(raw)
+                        except Exception:
+                            continue
+                        if obj.get("method") == "Page.screencastFrame":
+                            params = obj.get("params") or {}
+                            data = params.get("data")
+                            if data:
+                                try:
+                                    self._broadcast(base64.b64decode(data))
+                                except Exception:
+                                    pass
+                            ack_id += 1
+                            await ws.send(json.dumps({
+                                "id": ack_id,
+                                "method": "Page.screencastFrameAck",
+                                "params": {"sessionId": params.get("sessionId", 0)},
+                            }))
             except Exception as exc:
-                log.debug("capture failed: %s", exc)
-            # capture every ~1s while there's a browser
-            import time as _t
-            _t.sleep(1.0)
+                log.warning("screencast error: %s", exc)
+            finally:
+                self._set_active(False)
+            await asyncio.sleep(2)
 
-    def snapshot(self) -> tuple[bytes | None, float]:
+    # ── subscription ───────────────────────────────────────────────────
+    def subscribe(self) -> tuple[int, queue.Queue]:
         with self._lock:
-            return self._latest, self._latest_ts
+            self._next_id += 1
+            sid = self._next_id
+            q: queue.Queue = queue.Queue(maxsize=3)
+            self._subs[sid] = q
+            return sid, q
+
+    def unsubscribe(self, sid: int) -> None:
+        with self._lock:
+            self._subs.pop(sid, None)
+
+    def _broadcast(self, jpg: bytes) -> None:
+        # Throttle to ~5 fps so the stream stays lean on mobile; CDP
+        # screencast sends at 30fps+ even for static pages.
+        now = time.time()
+        if now - getattr(self, "_last_send", 0) < 0.2:
+            self._latest = jpg
+            return
+        self._last_send = now
+        self._latest = jpg
+        with self._lock:
+            for q in list(self._subs.values()):
+                try:
+                    q.put_nowait(jpg)
+                except queue.Full:
+                    # drop oldest so slow clients never buffer weight
+                    try:
+                        q.get_nowait()
+                        q.put_nowait(jpg)
+                    except Exception:
+                        pass
+
+    def _set_active(self, active: bool) -> None:
+        self._active = active
+        if not active:
+            self._latest = None
+
+    def latest(self) -> tuple[bytes | None, bool]:
+        return self._latest, self._active
 
 
-_view: CdpView | None = None
+_b: ScreencastBroadcaster | None = None
 
 
-def get_view() -> CdpView:
-    global _view
-    if _view is None:
-        _view = CdpView()
-        _view.start()
-    return _view
+def get_broadcaster() -> ScreencastBroadcaster:
+    global _b
+    if _b is None:
+        _b = ScreencastBroadcaster()
+        _b.start()
+    return _b
