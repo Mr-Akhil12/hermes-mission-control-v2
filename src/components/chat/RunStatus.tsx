@@ -9,7 +9,7 @@ import type { ToolEvent, RunStats } from "@/lib/chat-types";
 
 export type RunPhase = "idle" | "initializing" | "thinking" | "tools" | "streaming" | "done" | "error";
 
-export function PhaseBanner({ phase, toolCount }: { phase: RunPhase; toolCount: number }) {
+export function PhaseBanner({ phase, toolCount, elapsedSec }: { phase: RunPhase; toolCount: number; elapsedSec?: number }) {
   if (phase === "idle") return null;
 
   const rows: { phase: RunPhase; label: string; icon: React.ReactNode; done: boolean }[] = [
@@ -21,6 +21,7 @@ export function PhaseBanner({ phase, toolCount }: { phase: RunPhase; toolCount: 
 
   const phaseOrder = ["initializing", "thinking", "tools", "streaming"] as const;
   const idx = phaseOrder.indexOf(phase as (typeof phaseOrder)[number]);
+  const fmt = elapsedSec != null ? `${Math.floor(elapsedSec / 60)}:${String(elapsedSec % 60).padStart(2, "0")}` : "";
 
   return (
     <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border px-3 py-2 text-xs" style={{ borderColor: "var(--card-border)", background: "color-mix(in srgb, var(--bg) 55%, transparent)" }}>
@@ -34,6 +35,12 @@ export function PhaseBanner({ phase, toolCount }: { phase: RunPhase; toolCount: 
           </span>
         );
       })}
+      {fmt && (
+        <span className="ml-auto flex items-center gap-1.5 font-mono text-[10px]" style={{ color: "var(--text-faint)" }}>
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full" style={{ background: "var(--accent)" }} />
+          {fmt}
+        </span>
+      )}
     </div>
   );
 }

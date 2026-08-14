@@ -54,6 +54,7 @@ export default function ChatPage() {
   const [live, setLive] = useState<LiveState>(IDLE_LIVE);
   const [settings, setSettings] = useState<ChatSettings>(DEFAULT_SETTINGS);
   const [streamedText, setStreamedText] = useState("");
+  const [elapsedSec, setElapsedSec] = useState(0);
   const [retryTarget, setRetryTarget] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
   const [titleDraft, setTitleDraft] = useState("");
@@ -62,6 +63,10 @@ export default function ChatPage() {
   const streamAbort = useRef<AbortController | null>(null);
   const liveRef = useRef(live);
   liveRef.current = live;
+  // Synchronous busy flag — the `send` closure's `busy` goes stale during
+  // the finally-block queue flush; this ref always has the latest value.
+  const busyRef = useRef(false);
+  busyRef.current = busy;
   // Per-conversation unsent draft text, preserved when navigating between chats.
   const draftsRef = useRef<Record<string, string>>({});
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -133,6 +138,18 @@ export default function ChatPage() {
       }
     });
   }, [loadSessions, loadMessages]);
+
+  // Live elapsed timer — ticks every second while a run is active so the UI
+  // always shows progress, even during quiet tool calls / model thinking.
+  useEffect(() => {
+    if (!busy) return;
+    setElapsedSec(0);
+    const started = Date.now();
+    const t = setInterval(() => {
+      setElapsedSec(Math.floor((Date.now() - started) / 1000));
+    }, 1000);
+    return () => clearInterval(t);
+  }, [busy]);
 
   const scrollToBottom = useCallback(() => {
     bottomRef.current?.scrollIntoView({ behavior: settings.autoScroll ? "smooth" : "auto" });
@@ -534,10 +551,11 @@ export default function ChatPage() {
   );
 
   // ── Send / stream ───────────────────────────────────────────────────
+  const pendingQueue = useRef<string[]>([]);
   const send = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed || busy || !activeId) return;
+      if (!trimmed || !activeId) return;
 
       // Slash commands are handled locally (server-backed for info commands).
       if (trimmed.startsWith("/")) {
@@ -547,6 +565,20 @@ export default function ChatPage() {
           setInput("");
           return;
         }
+      }
+
+      // Never drop messages silently: if a run is active, queue the message
+      // and surface it in the UI so the user knows it's waiting.
+      if (busyRef.current) {
+        pendingQueue.current.push(trimmed);
+        setMessages((m) => [
+          ...m,
+          { role: "user", content: trimmed },
+          { role: "system", content: "⏳ Queued — waiting for the current run to finish, then I'll pick this up." },
+        ]);
+        if (activeId) draftsRef.current[activeId] = "";
+        setInput("");
+        return;
       }
 
       if (activeId) draftsRef.current[activeId] = "";
@@ -596,11 +628,22 @@ export default function ChatPage() {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        // Stall watchdog: if no SSE event lands for 90s, abort the fetch so
+        // the finally block reconciles from the server and flushes the queue.
+        // Prevents the "busy forever, messages silently dropped" failure.
+        let lastEventAt = Date.now();
+        const stallTimer = setInterval(() => {
+          if (Date.now() - lastEventAt > 90_000) {
+            abort.abort();
+          }
+        }, 15_000);
 
+        try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
+          lastEventAt = Date.now();
 
           const frames = buffer.split("\n\n");
           buffer = frames.pop() ?? "";
@@ -744,6 +787,9 @@ export default function ChatPage() {
             }
           }
         }
+        } finally {
+          clearInterval(stallTimer);
+        }
       } catch (e: any) {
         if (e?.name !== "AbortError") {
           setError(e instanceof Error ? e.message : String(e));
@@ -778,6 +824,14 @@ export default function ChatPage() {
           /* best-effort */
         }
         await loadSessions();
+
+        // Flush any queued messages now that the run is done.
+        busyRef.current = false; // ensure the flush send() isn't seen as busy
+        const queued = pendingQueue.current.splice(0);
+        for (const q of queued) {
+          setMessages((m) => m.filter((x) => !(x.role === "system" && x.content.includes("Queued — waiting"))));
+          await send(q);
+        }
       }
 
       if (voiceOn && full) {
@@ -1127,7 +1181,7 @@ export default function ChatPage() {
                   {messages.map((m, i) => (
                     <MessageBubble key={`${m.role}-${i}`} msg={m} settings={settings} />
                   ))}
-                  {busy && <PhaseBanner phase={live.phase} toolCount={live.toolCount} />}
+                  {busy && <PhaseBanner phase={live.phase} toolCount={live.toolCount} elapsedSec={elapsedSec} />}
                   {busy && renderLiveContent()}
                   {busy && (
                     <RunStatsFooter
