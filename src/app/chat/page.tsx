@@ -49,6 +49,7 @@ export default function ChatPage() {
   const [voiceOn, setVoiceOn] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sessionFilter, setSessionFilter] = useState<"chats" | "all">("chats");
   const [live, setLive] = useState<LiveState>(IDLE_LIVE);
   const [settings, setSettings] = useState<ChatSettings>(DEFAULT_SETTINGS);
   const [streamedText, setStreamedText] = useState("");
@@ -755,15 +756,39 @@ export default function ChatPage() {
                   <ChevronLeft className="h-4 w-4" />
                 </button>
               </div>
+              <div className="flex gap-1 px-2 pb-1">
+                {(["chats", "all"] as const).map((f) => (
+                  <button
+                    key={f}
+                    onClick={() => setSessionFilter(f)}
+                    className="flex-1 rounded-lg px-2 py-1 text-[10px] font-semibold uppercase tracking-wide"
+                    style={
+                      sessionFilter === f
+                        ? { background: "rgba(124,108,255,0.14)", color: "var(--accent)" }
+                        : { color: "var(--text-faint)" }
+                    }
+                  >
+                    {f === "chats" ? "Chats" : "All"}
+                  </button>
+                ))}
+              </div>
               <div className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2">
                 {sessionsLoading ? (
                   <SessionListSkeleton />
-                ) : sessions.length === 0 ? (
+                ) : (sessionFilter === "chats"
+                    ? sessions.filter((s) => s.source !== "cron" && s.source !== "subagent")
+                    : sessions
+                  ).length === 0 ? (
                   <div className="px-2 py-4 text-xs" style={{ color: "var(--text-faint)" }}>
-                    No conversations yet.
+                    {sessionFilter === "chats"
+                      ? "No dashboard conversations yet — start one with New conversation."
+                      : "No conversations yet."}
                   </div>
                 ) : (
-                  sessions.map((s) => (
+                  (sessionFilter === "chats"
+                    ? sessions.filter((s) => s.source !== "cron" && s.source !== "subagent")
+                    : sessions
+                  ).map((s) => (
                     <div
                       key={s.id}
                       role="button"

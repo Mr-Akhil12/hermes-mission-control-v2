@@ -80,6 +80,7 @@ export type SessionMeta = {
   message_count?: number;
   last_message?: string | null;
   tool_call_count?: number;
+  source?: string;
   created_at?: string;
   updated_at?: string;
 };
