@@ -508,6 +508,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"enabled": push.available(), "subscriptions": len(push._load_subs())})
             elif path == "/v1/models":
                 self._proxy_api_get(path)
+            elif path == "/api/browser/shot":
+                self._browser_shot()
+                return
             elif path == "/api/health":
                 self._json({"ok": True, "time": datetime.now(SAST).isoformat(), "port": PORT})
             else:
@@ -712,6 +715,29 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": str(exc), "name": name}, 502)
         except Exception as exc:
             self._json({"error": str(exc), "name": name}, 500)
+
+    def _browser_shot(self) -> None:
+        """GET /api/browser/shot — latest headed-browser screenshot (JPEG)."""
+        try:
+            import cdp_view
+            view = cdp_view.get_view()
+            shot, ts = view.snapshot()
+            if not shot:
+                # Try one live capture on first request
+                import asyncio as _aio
+                shot = _aio.run(cdp_view._capture_once(timeout=6))
+            if not shot:
+                self._json({"error": "browser not available"}, 503)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(shot)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(shot)
+        except Exception as e:
+            self._json({"error": str(e)}, 500)
 
     def do_PATCH(self) -> None:
         """Forward PATCH to the Hermes API — session title updates etc."""

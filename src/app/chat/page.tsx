@@ -11,6 +11,7 @@ import { ChatSettingsButton, DEFAULT_SETTINGS, loadSettings } from "@/components
 import { SlashAutocomplete } from "@/components/chat/SlashAutocomplete";
 import { PhaseBanner, RunStatsFooter, type RunPhase } from "@/components/chat/RunStatus";
 import { MessageSkeleton, SessionListSkeleton } from "@/components/chat/Skeleton";
+import { BrowserView } from "@/components/chat/BrowserView";
 
 const MODEL = "deepseek-v4-flash:0731";
 
@@ -855,9 +856,17 @@ export default function ChatPage() {
         ? live.reasoning.slice(-900)
         : live.reasoning;
 
+    const usingBrowser = live.tools.some(
+      (t) =>
+        t.name.includes("browser") ||
+        t.name.includes("web_extract") ||
+        t.name.includes("web_search")
+    );
+
     return (
       <div className="flex justify-start">
         <div className="max-w-[88%] min-w-0 rounded-2xl border px-4 py-2.5 text-sm" style={{ borderColor: "var(--card-border)", background: "color-mix(in srgb, var(--bg) 60%, transparent)", color: "var(--text)" }}>
+          {usingBrowser && <BrowserView />}
           {showReasoning && (
             <div className="mb-2 whitespace-pre-wrap rounded-lg border-l-2 px-2.5 py-1.5 text-xs leading-relaxed" style={{ borderLeftColor: "var(--accent)", background: "rgba(124,108,255,0.06)", color: "var(--text-dim)", maxHeight: 240, overflowY: "auto" }}>
               {displayReasoning}
