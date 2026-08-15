@@ -920,6 +920,7 @@ export default function ChatPage() {
     rec.continuous = true;
     let finalText = "";
     let lastIndex = 0;
+    let lastFinal = "";
     let silenceTimer: ReturnType<typeof setTimeout> | null = null;
     const stopAndSend = () => {
       if (silenceTimer) {
@@ -930,6 +931,7 @@ export default function ChatPage() {
       setListening(false);
       const text = finalText.trim();
       finalText = "";
+      lastFinal = "";
       if (text) {
         setInput(text);
         send(text);
@@ -937,13 +939,27 @@ export default function ChatPage() {
     };
     rec.onresult = (e: any) => {
       let interim = "";
-      // Chrome re-fires onresult with the SAME final results on every event.
-      // Only consume results we haven't seen yet (index >= lastIndex) so
-      // continuous mode never stacks duplicates of the same phrase.
+      // Chrome re-fires onresult with the SAME final results on every event,
+      // and while you hesitate it finalizes partial phrases ("I" → "I am" → "I am testing").
+      // Two rules keep the transcript clean:
+      //  1. Only consume results we haven't seen yet (index >= lastIndex).
+      //  2. If a new final is a continuation of the previous one (starts with it),
+      //     REPLACE it instead of appending — so hesitant speech doesn't stack.
       for (let i = Math.max(e.resultIndex, lastIndex); i < e.results.length; i++) {
         const r = e.results[i];
         if (r.isFinal) {
-          finalText += r[0].transcript + " ";
+          const t = r[0].transcript.trim();
+          if (t) {
+            if (lastFinal && t.startsWith(lastFinal)) {
+              // Continuation of the same phrase — replace the old partial.
+              // finalText stores each phrase with a trailing space, so drop
+              // lastFinal + its space before appending the new one.
+              finalText = finalText.slice(0, Math.max(0, finalText.length - lastFinal.length - 1)) + t + " ";
+            } else {
+              finalText += t + " ";
+            }
+            lastFinal = t;
+          }
           lastIndex = i + 1;
         } else {
           interim += r[0].transcript;
