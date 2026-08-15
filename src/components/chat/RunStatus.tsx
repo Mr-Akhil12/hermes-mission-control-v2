@@ -62,7 +62,7 @@ export function RunStatsFooter({ stats, phase }: { stats: RunStats | null; phase
 
   return (
     <div
-      className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border px-3 py-1.5 font-mono text-[10px]"
+      className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border px-3 py-1.5 font-mono text-[10px]"
       style={{ borderColor: "var(--card-border)", color: "var(--text-faint)" }}
     >
       <span className="flex items-center gap-1">

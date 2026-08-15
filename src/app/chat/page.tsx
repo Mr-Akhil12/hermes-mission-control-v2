@@ -52,6 +52,7 @@ export default function ChatPage() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sessionFilter, setSessionFilter] = useState<"chats" | "all">("chats");
   const [live, setLive] = useState<LiveState>(IDLE_LIVE);
+  const [lastStats, setLastStats] = useState<RunStats | null>(null);
   const [settings, setSettings] = useState<ChatSettings>(DEFAULT_SETTINGS);
   const [streamedText, setStreamedText] = useState("");
   const [elapsedSec, setElapsedSec] = useState(0);
@@ -843,19 +844,24 @@ export default function ChatPage() {
         // Ensure the run settles to "done" even if the SSE tail (run.completed
         // with usage/runtime) was dropped through the proxy chain — the footer
         // should always appear with whatever stats we captured.
-        setLive((prev) =>
-          prev.phase === "error"
-            ? prev
-            : {
-                ...prev,
-                phase: "done",
-                stats: {
-                  ...(prev.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }),
-                  completedAt: Date.now(),
-                  durationMs: Date.now() - (prev.stats?.startedAt ?? Date.now()),
-                },
-              }
-        );
+        setLive((prev) => {
+          const settled: LiveState =
+            prev.phase === "error"
+              ? prev
+              : {
+                  ...prev,
+                  phase: "done",
+                  stats: {
+                    ...(prev.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }),
+                    completedAt: Date.now(),
+                    durationMs: Date.now() - (prev.stats?.startedAt ?? Date.now()),
+                  },
+                };
+          // Persist the last run's stats so the permanent footer keeps showing
+          // them after the run settles (idle state otherwise clears them).
+          if (settled.stats) setLastStats(settled.stats);
+          return settled;
+        });
         // Reconcile against ground truth ONLY when the SSE tail was dropped
         // (run.completed never arrived). When it did arrive, the local message
         // list + stats are already correct — reloading here would replace the
@@ -967,9 +973,9 @@ export default function ChatPage() {
       }
       // Show live interim text so it feels responsive, but don't send yet.
       setInput((finalText + interim).trim());
-      // Restart the silence timer on every new speech — 1.6s of quiet = done talking.
+      // Restart the silence timer on every new speech — 2.5s of quiet = done talking.
       if (silenceTimer) clearTimeout(silenceTimer);
-      silenceTimer = setTimeout(stopAndSend, 1600);
+      silenceTimer = setTimeout(stopAndSend, 2500);
     };
     rec.onend = () => {
       if (silenceTimer) {
@@ -1122,13 +1128,13 @@ export default function ChatPage() {
         <div className="flex items-center gap-2">
           <button
             onClick={() => setSidebarOpen((v) => !v)}
-            className="flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border"
             style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}
-            title="Toggle conversations sidebar"
+            title="Conversations"
             aria-label="Toggle conversations sidebar"
           >
-            {sidebarOpen ? <ChevronLeft className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-            Conversations
+            <MessageSquare className="h-3.5 w-3.5" />
+            {sidebarOpen ? <ChevronLeft className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
           </button>
           <ChatSettingsButton settings={settings} onChange={setSettings} />
           <button
@@ -1305,23 +1311,6 @@ export default function ChatPage() {
                   ))}
                   {busy && <PhaseBanner phase={live.phase} toolCount={live.toolCount} elapsedSec={elapsedSec} />}
                   {busy && renderLiveContent()}
-                  {busy && (
-                    <RunStatsFooter
-                      stats={{
-                        toolCount: live.toolCount,
-                        failedTools: live.failedCount,
-                        startedAt: live.stats?.startedAt ?? Date.now(),
-                        completedAt: live.stats?.completedAt,
-                        durationMs: live.stats?.durationMs,
-                        usage: live.stats?.usage,
-                        runtime: live.stats?.runtime,
-                      }}
-                      phase={live.phase}
-                    />
-                  )}
-                  {!busy && live.phase === "done" && live.stats && settings.showStats && (
-                    <RunStatsFooter stats={live.stats} phase="done" />
-                  )}
                 </>
               )}
               <div ref={bottomRef} />
@@ -1332,6 +1321,16 @@ export default function ChatPage() {
                 {error}
               </div>
             )}
+
+            {/* Permanent run stats — model, tools, context usage. Always visible
+                above the composer so it's constantly monitorable. Shows the last
+                run's stats when idle, live stats while a run is in progress. */}
+            <div className="border-t px-3 py-1.5" style={{ borderColor: "var(--card-border)" }}>
+              <RunStatsFooter
+                stats={live.phase !== "idle" && live.stats ? live.stats : lastStats}
+                phase={live.phase !== "idle" ? live.phase : "done"}
+              />
+            </div>
 
             {/* Composer — collapsed: auto-grows, wraps after one line */}
             <div className="relative flex items-end gap-2 border-t p-3" style={{ borderColor: "var(--card-border)" }}>
