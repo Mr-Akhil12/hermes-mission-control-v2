@@ -612,6 +612,12 @@ export default function ChatPage() {
       // full server reload in finally (which replaces the whole array and
       // forces every bubble to re-render = the "full screen refresh" feel).
       let completedCleanly = false;
+      // True only when the assistant's final reply was actually appended to the
+      // local message list inside assistant.completed. run.completed can arrive
+      // cleanly even if assistant.completed was dropped or its frame failed
+      // JSON.parse — in that case the local list is missing the answer, so the
+      // safety-net reload below must still fire.
+      let assistantAppended = false;
 
       const bumpLive = (patch: Partial<LiveState>) => {
         setLive((prev) => ({ ...prev, ...patch }));
@@ -776,6 +782,7 @@ export default function ChatPage() {
                     }
                     return copy;
                   });
+                  assistantAppended = true;
                 }
                 runRuntime = (payload as any).runtime ?? runRuntime;
                 bumpLive({ phase: "streaming", stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), runtime: runRuntime } });
@@ -842,7 +849,7 @@ export default function ChatPage() {
         // list + stats are already correct — reloading here would replace the
         // whole array and force every bubble to re-render (the "full screen
         // refresh" feel on mobile). Skip it for a clean completion.
-        if (!completedCleanly) {
+        if (!completedCleanly || !assistantAppended) {
           try {
             await loadMessages(activeId);
           } catch {
