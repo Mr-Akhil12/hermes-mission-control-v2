@@ -83,9 +83,8 @@ export default function ChatPage() {
     const el = composerRef.current;
     if (!el) return;
     el.style.height = "auto";
-    const cap = composerExpanded ? 240 : 120;
-    el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
-  }, [input, composerExpanded]);
+    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+  }, [input]);
 
   // Restore the unsent draft for the newly active conversation.
   useEffect(() => {
@@ -1011,7 +1010,7 @@ export default function ChatPage() {
         </div>
       </div>
 
-      <div className="card flex min-h-0 flex-1 flex-col">
+      <div className="card relative flex min-h-0 flex-1 flex-col overflow-hidden">
         <div className="flex min-h-0 flex-1">
           {/* Conversation sidebar — slides in as a full-height overlay */}
           <div
@@ -1211,7 +1210,7 @@ export default function ChatPage() {
               </div>
             )}
 
-            {/* Composer */}
+            {/* Composer — collapsed: auto-grows, wraps after one line */}
             <div className="relative flex items-end gap-2 border-t p-3" style={{ borderColor: "var(--card-border)" }}>
               <SlashAutocomplete
                 input={input}
@@ -1245,7 +1244,7 @@ export default function ChatPage() {
                 placeholder={activeId ? "Message Hermes…  (type / for commands)" : "Start a new conversation first…"}
                 disabled={!activeId || busy}
                 className="min-w-0 flex-1 resize-none overflow-y-auto rounded-lg border bg-transparent px-3 py-2 text-sm leading-relaxed outline-none disabled:opacity-50"
-                style={{ borderColor: "var(--card-border)", color: "var(--text)", maxHeight: composerExpanded ? 240 : 120 }}
+                style={{ borderColor: "var(--card-border)", color: "var(--text)", maxHeight: 120 }}
               />
               <button
                 onClick={() => setComposerExpanded((v) => !v)}
@@ -1253,7 +1252,7 @@ export default function ChatPage() {
                 className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border disabled:opacity-40"
                 style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}
                 aria-label={composerExpanded ? "Collapse composer" : "Expand composer"}
-                title={composerExpanded ? "Collapse composer" : "Expand composer for full typing & reading"}
+                title={composerExpanded ? "Collapse composer" : "Expand composer to fill the chat container"}
               >
                 {composerExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
               </button>
@@ -1277,6 +1276,67 @@ export default function ChatPage() {
                 <Volume2 className="h-4 w-4" />
               </button>
             </div>
+
+            {/* Composer — expanded: fills the chat container (not the viewport) */}
+            {composerExpanded && (
+              <div
+                className="absolute inset-0 z-20 flex flex-col"
+                style={{ background: "var(--card)", borderColor: "var(--card-border)" }}
+              >
+                <div className="flex items-center justify-between border-b px-4 py-2" style={{ borderColor: "var(--card-border)" }}>
+                  <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>
+                    Composer — full view
+                  </span>
+                  <button
+                    onClick={() => setComposerExpanded(false)}
+                    className="flex h-8 w-8 items-center justify-center rounded-lg border"
+                    style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}
+                    aria-label="Collapse composer"
+                    title="Collapse composer"
+                  >
+                    <Minimize2 className="h-4 w-4" />
+                  </button>
+                </div>
+                <textarea
+                  autoFocus
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      send(input);
+                    }
+                  }}
+                  placeholder={activeId ? "Message Hermes…  (type / for commands)" : "Start a new conversation first…"}
+                  disabled={!activeId || busy}
+                  className="min-h-0 flex-1 resize-none bg-transparent px-4 py-3 text-sm leading-relaxed outline-none disabled:opacity-50"
+                  style={{ color: "var(--text)" }}
+                />
+                <div className="flex items-center gap-2 border-t px-4 py-3" style={{ borderColor: "var(--card-border)" }}>
+                  <button
+                    onClick={toggleMic}
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full"
+                    style={listening ? { background: "var(--red)", color: "#fff" } : { background: "rgba(124,108,255,0.12)", color: "var(--accent)" }}
+                    aria-label="Voice input"
+                  >
+                    {listening ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+                  </button>
+                  <button
+                    onClick={() => (busy ? stopRun() : send(input))}
+                    disabled={!busy && (!input.trim() || !activeId)}
+                    className="flex h-10 items-center gap-2 rounded-lg px-4 text-sm font-semibold text-white disabled:opacity-50"
+                    style={{ background: busy ? "rgba(255,92,92,0.85)" : "linear-gradient(135deg, var(--accent), var(--accent-2))" }}
+                    aria-label={busy ? "Stop" : "Send"}
+                  >
+                    {busy ? <Square className="h-4 w-4" /> : <Send className="h-4 w-4" />}
+                    {busy ? "Stop" : "Send"}
+                  </button>
+                  <span className="ml-auto text-[10px]" style={{ color: "var(--text-faint)" }}>
+                    Enter to send · Shift+Enter for newline
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
