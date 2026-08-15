@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Clock, ChevronDown, ChevronUp, ExternalLink, Brain, CheckCircle2, XCircle, Loader2, Search } from "lucide-react";
-import { fmtSAST, fmtSASTSec, fmtSASTRelative } from "@/lib/time";
+import { Clock, ChevronDown, ChevronUp, ExternalLink, Brain, CheckCircle2, XCircle, Loader2, Search, Send } from "lucide-react";
+import { fmtSAST, fmtSASTSec } from "@/lib/time";
+import { humanizeCron, humanizeDeliver } from "@/lib/cron";
 
 type CronJob = {
   job_id: string;
@@ -15,6 +16,7 @@ type CronJob = {
   state: string;
   no_agent: boolean;
   script: string | null;
+  deliver?: string | null;
 };
 
 type Run = {
@@ -180,8 +182,14 @@ export default function CronsPage() {
                       </span>
                     )}
                   </div>
-                  <div className="mt-0.5 text-xs" style={{ color: "var(--text-faint)" }}>
-                    {typeof cron.schedule === "string" ? cron.schedule : cron.schedule?.display ?? cron.schedule?.expr ?? "?"} · last {fmtSAST(cron.last_run_at)} · next {fmtSAST(cron.next_run_at)}
+                  <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs" style={{ color: "var(--text-faint)" }}>
+                    <span>{humanizeCron(cron.schedule)}</span>
+                    <span>· last {fmtSAST(cron.last_run_at)}</span>
+                    <span>· next {fmtSAST(cron.next_run_at)}</span>
+                    <span className="flex items-center gap-1" style={{ color: "var(--accent-2)" }}>
+                      <Send className="h-3 w-3" />
+                      {humanizeDeliver(cron.deliver).label}
+                    </span>
                   </div>
                 </div>
                 {isOpen ? <ChevronUp className="h-4 w-4 shrink-0" style={{ color: "var(--text-faint)" }} /> : <ChevronDown className="h-4 w-4 shrink-0" style={{ color: "var(--text-faint)" }} />}
@@ -253,6 +261,9 @@ export default function CronsPage() {
                   <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]" style={{ color: "var(--text-faint)" }}>
                     <span>ID: {cronId}</span>
                     {cron.script && <span>· script: {cron.script}</span>}
+                    <span className="flex items-center gap-1">
+                      <Send className="h-3 w-3" /> {humanizeDeliver(cron.deliver).label}
+                    </span>
                     <span className="ml-auto">
                       <a href="/crons" className="inline-flex items-center gap-1" style={{ color: "var(--accent-2)" }}>
                         Output link <ExternalLink className="h-3 w-3" />
