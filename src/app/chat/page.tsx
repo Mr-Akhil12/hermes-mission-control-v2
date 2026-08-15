@@ -670,6 +670,13 @@ export default function ChatPage() {
             } catch {
               continue;
             }
+            // The Hermes API puts the event type in the SSE `event:` line; the
+            // data payload does NOT carry an `event` field. Normalize so the
+            // switch below matches on the real event type — without this every
+            // frame fell through and the UI stayed stuck on "initializing".
+            if (!(payload as any).event) {
+              payload = { ...(payload as any), event } as StreamEvent;
+            }
 
             switch (payload.event) {
               case "run.started": {
