@@ -125,6 +125,18 @@ def load_sessions(limit: int = 25) -> list[dict]:
                 last = m[0][:200]
         except Exception:
             last = None
+        # A session is "active" if it has any message within the last 2 minutes —
+        # the agent is mid-run (thinking, tool calls, streaming) even if the
+        # session row itself never "ends" (dashboard sessions are resumable).
+        is_active = False
+        try:
+            recent = con.execute(
+                "SELECT 1 FROM messages WHERE session_id = ? AND timestamp > ? LIMIT 1",
+                (r[0], time.time() - 120),
+            ).fetchone()
+            is_active = recent is not None
+        except Exception:
+            is_active = False
         sessions.append(
             {
                 "id": r[0],
@@ -136,6 +148,7 @@ def load_sessions(limit: int = 25) -> list[dict]:
                 "message_count": r[6],
                 "tool_call_count": r[7],
                 "last_message": last,
+                "is_active": is_active,
             }
         )
     con.close()

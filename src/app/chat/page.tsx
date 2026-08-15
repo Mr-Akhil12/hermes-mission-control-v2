@@ -113,13 +113,39 @@ export default function ChatPage() {
       const res = await fetch(`/api/chat/sessions/${id}/messages`, { cache: "no-store" });
       const data = await res.json();
       const list = data?.data ?? [];
-      const msgs: ChatMsg[] = list
-        .filter((m: any) => ["user", "assistant", "system"].includes(m.role))
-        .map((m: any) => ({
+      // The Hermes API persists each assistant fragment as its own row —
+      // thinking text between tool calls, empty frames, and the final reply.
+      // Live view shows one continuous reply; history must too. Merge
+      // consecutive assistant rows into a single bubble (tool rows are
+      // dropped anyway), so a past conversation renders exactly like the
+      // current one: one message per turn.
+      const msgs: ChatMsg[] = [];
+      let pending: ChatMsg | null = null;
+      for (const m of list) {
+        if (!["user", "assistant", "system"].includes(m.role)) continue;
+        const msg: ChatMsg = {
           role: m.role,
           content: m.content ?? "",
           reasoning: m.reasoning_content ?? m.reasoning ?? null,
-        }));
+        };
+        if (msg.role === "assistant") {
+          if (pending) {
+            pending.content += (pending.content && msg.content ? "\n\n" : "") + msg.content;
+            if (msg.reasoning) {
+              pending.reasoning = pending.reasoning ? `${pending.reasoning}\n${msg.reasoning}` : msg.reasoning;
+            }
+          } else {
+            pending = { ...msg };
+          }
+        } else {
+          if (pending) {
+            msgs.push(pending);
+            pending = null;
+          }
+          msgs.push(msg);
+        }
+      }
+      if (pending) msgs.push(pending);
       setMessages(msgs);
     } catch (e) {
       setError(`Failed to load messages: ${e instanceof Error ? e.message : e}`);
@@ -138,6 +164,16 @@ export default function ChatPage() {
       }
     });
   }, [loadSessions, loadMessages]);
+
+  // Poll the session list every 15s so the "Working…" dots on active
+  // conversations stay live — including sessions running in the background
+  // (other devices, cron, dispatch) that this tab didn't start.
+  useEffect(() => {
+    const t = setInterval(() => {
+      loadSessions();
+    }, 15_000);
+    return () => clearInterval(t);
+  }, [loadSessions]);
 
   // Live elapsed timer — ticks every second while a run is active so the UI
   // always shows progress, even during quiet tool calls / model thinking.
@@ -1254,10 +1290,19 @@ export default function ChatPage() {
                         />
                       ) : (
                         <>
-                          <div className="truncate font-medium">
-                            {s.title || s.last_message || s.id.slice(0, 20)}
+                          <div className="flex items-center gap-1.5 truncate font-medium">
+                            {s.is_active && (
+                              <Loader2 className="h-3 w-3 shrink-0 animate-spin" style={{ color: "var(--accent)" }} />
+                            )}
+                            <span className="truncate">{s.title || s.last_message || s.id.slice(0, 20)}</span>
                           </div>
                           <div className="mt-0.5 flex items-center gap-2 text-[10px]" style={{ color: "var(--text-faint)" }}>
+                            {s.is_active && (
+                              <span className="flex items-center gap-1 font-semibold" style={{ color: "var(--accent)" }}>
+                                <span className="h-1.5 w-1.5 animate-pulse rounded-full" style={{ background: "var(--accent)" }} />
+                                Working…
+                              </span>
+                            )}
                             <span>{s.message_count ?? 0} msgs</span>
                             {s.tool_call_count != null && <span>· {s.tool_call_count} tools</span>}
                           </div>

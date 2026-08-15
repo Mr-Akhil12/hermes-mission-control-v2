@@ -83,6 +83,9 @@ export type SessionMeta = {
   source?: string;
   created_at?: string;
   updated_at?: string;
+  started_at?: string | number;
+  ended_at?: string | number | null;
+  is_active?: boolean;
 };
 
 // Display settings persisted to localStorage.
