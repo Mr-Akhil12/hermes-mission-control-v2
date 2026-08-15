@@ -68,11 +68,13 @@ export function ChatSettingsButton({
   const toggle = () => {
     if (!open && ref.current) {
       const r = ref.current.getBoundingClientRect();
-      // Anchor the popup to the button's viewport position so it can never
-      // render off-screen (mobile PWA bug: absolute right-0 overflowed left).
+      const isMobile = window.innerWidth < 768;
       setPos({
         top: r.bottom + 8,
-        right: Math.max(8, window.innerWidth - r.right),
+        // Mobile: pin the popup to the right edge of the screen so it never
+        // floats mid-screen or overflows left when the header wraps.
+        // Desktop: anchor to the button's right edge.
+        right: isMobile ? 12 : Math.max(8, window.innerWidth - r.right),
       });
     }
     setOpen((o) => !o);

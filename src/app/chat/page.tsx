@@ -1120,6 +1120,16 @@ export default function ChatPage() {
           <MessageSquare className="h-6 w-6" style={{ color: "var(--accent)" }} /> Chat + Voice
         </h1>
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => setSidebarOpen((v) => !v)}
+            className="flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold"
+            style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}
+            title="Toggle conversations sidebar"
+            aria-label="Toggle conversations sidebar"
+          >
+            {sidebarOpen ? <ChevronLeft className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+            Conversations
+          </button>
           <ChatSettingsButton settings={settings} onChange={setSettings} />
           <button
             onClick={newConversation}
@@ -1280,16 +1290,6 @@ export default function ChatPage() {
           {/* Messages */}
           <div className="flex min-w-0 flex-1 flex-col">
             <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
-              {!sidebarOpen && (
-                <button
-                  onClick={() => setSidebarOpen(true)}
-                  className="mb-2 flex items-center gap-1 rounded-lg border px-2 py-1 text-xs"
-                  style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}
-                >
-                  <ChevronRight className="h-3 w-3" /> Conversations
-                </button>
-              )}
-
               {messagesLoading ? (
                 <MessageSkeleton />
               ) : messages.length === 0 && !busy ? (
