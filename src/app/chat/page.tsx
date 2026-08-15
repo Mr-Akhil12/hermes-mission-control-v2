@@ -1022,7 +1022,7 @@ export default function ChatPage() {
               width: "100%",
               height: "100%",
               zIndex: 10,
-              background: "color-mix(in srgb, var(--card-bg) 98%, transparent)",
+              background: "color-mix(in srgb, var(--bg-2) 97%, transparent)",
               backdropFilter: "blur(2px)",
               borderRight: sidebarOpen ? "1px solid var(--card-border)" : "none",
             }}
