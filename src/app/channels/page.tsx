@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { MessageSquare, RefreshCw, Server, Radio, Hash, CheckCircle2, XCircle, AlertTriangle } from "lucide-react";
+import { fmtSAST } from "@/lib/time";
 
 type Platform = {
   id: string;
@@ -60,11 +61,7 @@ export default function ChannelsPage() {
     return () => clearInterval(t);
   }, [load]);
 
-  const fmtTime = (ts: number | null | undefined) => {
-    if (!ts) return "—";
-    const d = new Date(ts * 1000);
-    return d.toLocaleString("en-ZA", { timeZone: "Africa/Johannesburg", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
-  };
+  const fmtTime = (ts: number | null | undefined) => (ts ? fmtSAST(ts * 1000) : "—");
 
   const stateColor = (s: string) => (s === "connected" ? "var(--green)" : s === "retrying" ? "var(--amber)" : "var(--red)");
 

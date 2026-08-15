@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { TrendingUp, TrendingDown, Activity, Target, RefreshCw, BookOpen, AlertTriangle } from "lucide-react";
+import { fmtSAST } from "@/lib/time";
 
 type Trade = {
   id: number;
@@ -82,8 +83,7 @@ export default function TradingPage() {
 
   const fmtDate = (d: string | null) => {
     if (!d) return "—";
-    const dt = new Date(d.replace(" ", "T") + "Z");
-    return dt.toLocaleString("en-ZA", { timeZone: "Africa/Johannesburg", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+    return fmtSAST(d.replace(" ", "T") + "Z");
   };
 
   return (

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { AlertTriangle, CheckCircle2, ArrowRight, Send, NotebookPen, CalendarDays, Activity } from "lucide-react";
+import { fmtSAST } from "@/lib/time";
 
 type CronJob = {
   job_id?: string;
@@ -121,7 +122,7 @@ export default function Home() {
                   <div>
                     <div className="text-sm font-semibold">{c.name}</div>
                     <div className="text-xs" style={{ color: "var(--text-faint)" }}>
-                      last run {c.last_run_at ? new Date(c.last_run_at).toLocaleString("en-ZA", { timeZone: "Africa/Johannesburg" }) : "—"}
+                      last run {c.last_run_at ? fmtSAST(c.last_run_at) : "—"}
                     </div>
                   </div>
                   <span className="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase" style={{ background: "color-mix(in srgb, var(--red) 15%, transparent)", color: "var(--red)" }}>

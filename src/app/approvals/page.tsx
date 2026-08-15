@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { ShieldCheck, Check, X, Info, RefreshCw, Clock, ExternalLink } from "lucide-react";
+import { fmtSAST } from "@/lib/time";
 
 type Approval = {
   run_id: string;
@@ -120,7 +121,7 @@ export default function ApprovalsPage() {
                       {a.risk} risk
                     </span>
                     <span className="flex items-center gap-1 text-[11px]" style={{ color: "var(--text-faint)" }}>
-                      <Clock className="h-3 w-3" /> {new Date(a.created_at).toLocaleString("en-ZA", { timeZone: "Africa/Johannesburg" })}
+                      <Clock className="h-3 w-3" /> {fmtSAST(a.created_at)}
                     </span>
                   </div>
                   <h3 className="mt-2 font-semibold">{a.what || "Dangerous command"}</h3>
@@ -177,7 +178,7 @@ export default function ApprovalsPage() {
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-mono text-xs">{h.command || h.what}</div>
                   <div className="text-[10px]" style={{ color: "var(--text-faint)" }}>
-                    {h.status} · {h.resolved_at ? new Date(h.resolved_at).toLocaleString("en-ZA", { timeZone: "Africa/Johannesburg" }) : h.created_at}
+                    {h.status} · {h.resolved_at ? fmtSAST(h.resolved_at) : h.created_at}
                   </div>
                 </div>
                 <span className="rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase" style={{ background: "color-mix(in srgb, var(--bg) 60%, transparent)", color: "var(--text-faint)" }}>

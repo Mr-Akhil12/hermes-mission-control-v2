@@ -8,6 +8,7 @@ import {
 import type { ChatMsg, ChatSettings, SessionMeta, StreamEvent, ToolEvent, RunStats } from "@/lib/chat-types";
 import { MessageBubble, MarkdownLite } from "@/components/chat/MessageBubble";
 import { ChatSettingsButton, DEFAULT_SETTINGS, loadSettings } from "@/components/chat/ChatSettings";
+import { Composer } from "@/components/chat/Composer";
 import { SlashAutocomplete } from "@/components/chat/SlashAutocomplete";
 import { PhaseBanner, RunStatsFooter, type RunPhase } from "@/components/chat/RunStatus";
 import { MessageSkeleton, SessionListSkeleton } from "@/components/chat/Skeleton";
@@ -63,6 +64,12 @@ export default function ChatPage() {
   const reasoningRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
   const streamAbort = useRef<AbortController | null>(null);
+  // Which session the current SSE stream belongs to — so switching away
+  // doesn't kill a background run, and switching back can restore its state.
+  const streamSessionRef = useRef<string | null>(null);
+  // Per-session live state, preserved across switches so an active stream
+  // keeps rendering when you come back to its conversation.
+  const liveBySessionRef = useRef<Record<string, { live: LiveState; streamedText: string }>>({});
   const liveRef = useRef(live);
   liveRef.current = live;
   // Synchronous busy flag — the `send` closure's `busy` goes stale during
@@ -71,22 +78,12 @@ export default function ChatPage() {
   busyRef.current = busy;
   // Per-conversation unsent draft text, preserved when navigating between chats.
   const draftsRef = useRef<Record<string, string>>({});
-  const composerRef = useRef<HTMLTextAreaElement>(null);
   const [composerExpanded, setComposerExpanded] = useState(false);
 
   // Load display settings once.
   useEffect(() => {
     setSettings(loadSettings());
   }, []);
-
-  // Auto-resize the composer textarea to fit its content (wraps after one
-  // line, grows up to a cap). Collapses back to a single line when cleared.
-  useEffect(() => {
-    const el = composerRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
-  }, [input]);
 
   // Restore the unsent draft for the newly active conversation.
   useEffect(() => {
@@ -687,7 +684,13 @@ export default function ChatPage() {
       let assistantAppended = false;
 
       const bumpLive = (patch: Partial<LiveState>) => {
-        setLive((prev) => ({ ...prev, ...patch }));
+        setLive((prev) => {
+          const next = { ...prev, ...patch };
+          // Keep the per-session snapshot fresh so switching back to this
+          // conversation restores the live stream where it left off.
+          if (sessionId) liveBySessionRef.current[sessionId] = { live: next, streamedText };
+          return next;
+        });
       };
 
       try {
@@ -764,6 +767,10 @@ export default function ChatPage() {
                   // message list per-delta. Appending on every delta forces a
                   // full list re-render on mobile (shimmer/refresh feel).
                   setStreamedText(full);
+                  if (sessionId) {
+                    const snap = liveBySessionRef.current[sessionId];
+                    if (snap) liveBySessionRef.current[sessionId] = { ...snap, streamedText: full };
+                  }
                   if (liveRef.current.phase !== "tools") bumpLive({ phase: "streaming" });
                   // Live token estimate so the footer's output-token count
                   // ticks up in real time instead of only appearing at the
@@ -1068,16 +1075,27 @@ export default function ChatPage() {
     if (busy) return;
     // Preserve the unsent draft of the conversation we're leaving.
     if (activeId) draftsRef.current[activeId] = input;
+    // Save the current session's live state so we can restore it when the
+    // user comes back — an active stream keeps its place in the UI.
+    if (activeId) {
+      liveBySessionRef.current[activeId] = { live, streamedText };
+    }
     setActiveId(id);
     setMessages([]);
     setStreamedText("");
     setLive(IDLE_LIVE);
+    // Restore this session's live state if it has one (background stream).
+    const saved = liveBySessionRef.current[id];
+    if (saved) {
+      setLive(saved.live);
+      setStreamedText(saved.streamedText);
+    }
     // Await the load so the sidebar doesn't briefly show the wrong conversation.
     void loadMessages(id);
     // On mobile the sidebar fills the whole view — close it after picking
     // so the conversation is visible. Desktop keeps it open.
     if (window.innerWidth < 768) setSidebarOpen(false);
-  }, [busy, loadMessages, activeId, input]);
+  }, [busy, loadMessages, activeId, input, live, streamedText]);
 
   const deleteSession = useCallback(async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -1406,72 +1424,22 @@ export default function ChatPage() {
               />
             </div>
 
-            {/* Composer — collapsed: auto-grows, wraps after one line */}
-            <div className="relative flex items-end gap-2 border-t p-3" style={{ borderColor: "var(--card-border)" }}>
-              <SlashAutocomplete
-                input={input}
-                onApply={(next) => setInput(next)}
-              />
-              <button
-                onClick={toggleMic}
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full"
-                style={listening ? { background: "var(--red)", color: "#fff" } : { background: "rgba(124,108,255,0.12)", color: "var(--accent)" }}
-                aria-label="Voice input"
-              >
-                {listening ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
-              </button>
-              {listening && (
-                <span className="animate-pulse text-xs font-semibold" style={{ color: "var(--red)" }}>
-                  Listening…
-                </span>
-              )}
-              <textarea
-                ref={composerRef}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  // Enter sends; Shift+Enter inserts a newline.
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    send(input);
-                  }
-                }}
-                rows={1}
-                placeholder={activeId ? "Message Hermes…  (type / for commands)" : "Type your first message to start…"}
-                disabled={busy}
-                className="min-w-0 flex-1 resize-none overflow-y-auto rounded-lg border bg-transparent px-3 py-2 text-sm leading-relaxed outline-none disabled:opacity-50"
-                style={{ borderColor: "var(--card-border)", color: "var(--text)", maxHeight: 120 }}
-              />
-              <button
-                onClick={() => setComposerExpanded((v) => !v)}
-                disabled={busy}
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border disabled:opacity-40"
-                style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}
-                aria-label={composerExpanded ? "Collapse composer" : "Expand composer"}
-                title={composerExpanded ? "Collapse composer" : "Expand composer to fill the chat container"}
-              >
-                {composerExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
-              </button>
-              <button
-                onClick={() => (busy ? stopRun() : send(input))}
-                disabled={!busy && !input.trim()}
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-white disabled:opacity-50"
-                style={{ background: busy ? "rgba(255,92,92,0.85)" : "linear-gradient(135deg, var(--accent), var(--accent-2))" }}
-                aria-label={busy ? "Stop" : "Send"}
-                title={busy ? "Stop this run (interrupts the agent server-side)" : "Send"}
-              >
-                {busy ? <Square className="h-4 w-4" /> : <Send className="h-4 w-4" />}
-              </button>
-              <button
-                onClick={() => setVoiceOn((v) => !v)}
-                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border ${voiceOn ? "" : "opacity-40"}`}
-                style={{ borderColor: "var(--card-border)", color: "var(--accent-2)" }}
-                aria-label="Toggle spoken responses"
-                title="Spoken responses (Jarvis)"
-              >
-                <Volume2 className="h-4 w-4" />
-              </button>
-            </div>
+            {/* Composer — extracted component so typing doesn't re-render the
+                whole page (sidebar + stats + messages). Fixes textbox lag. */}
+            <Composer
+              input={input}
+              setInput={setInput}
+              send={send}
+              busy={busy}
+              stopRun={stopRun}
+              activeId={activeId}
+              listening={listening}
+              toggleMic={toggleMic}
+              composerExpanded={composerExpanded}
+              setComposerExpanded={setComposerExpanded}
+              voiceOn={voiceOn}
+              setVoiceOn={setVoiceOn}
+            />
 
             {/* Composer — expanded: fills the chat container (not the viewport) */}
             {composerExpanded && (
@@ -1503,8 +1471,8 @@ export default function ChatPage() {
                       send(input);
                     }
                   }}
-                  placeholder={activeId ? "Message Hermes…  (type / for commands)" : "Start a new conversation first…"}
-                  disabled={!activeId || busy}
+                  placeholder={activeId ? "Message Hermes…  (type / for commands)" : "Type your first message to start…"}
+                  disabled={busy}
                   className="min-h-0 flex-1 resize-none bg-transparent px-4 py-3 text-sm leading-relaxed outline-none disabled:opacity-50"
                   style={{ color: "var(--text)" }}
                 />
@@ -1519,7 +1487,7 @@ export default function ChatPage() {
                   </button>
                   <button
                     onClick={() => (busy ? stopRun() : send(input))}
-                    disabled={!busy && (!input.trim() || !activeId)}
+                    disabled={!busy && !input.trim()}
                     className="flex h-10 items-center gap-2 rounded-lg px-4 text-sm font-semibold text-white disabled:opacity-50"
                     style={{ background: busy ? "rgba(255,92,92,0.85)" : "linear-gradient(135deg, var(--accent), var(--accent-2))" }}
                     aria-label={busy ? "Stop" : "Send"}

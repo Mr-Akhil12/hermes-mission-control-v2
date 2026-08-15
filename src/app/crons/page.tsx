@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Clock, ChevronDown, ChevronUp, ExternalLink, Brain, CheckCircle2, XCircle, Loader2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Clock, ChevronDown, ChevronUp, ExternalLink, Brain, CheckCircle2, XCircle, Loader2, Search } from "lucide-react";
+import { fmtSAST, fmtSASTSec, fmtSASTRelative } from "@/lib/time";
 
 type CronJob = {
   job_id: string;
@@ -38,6 +39,7 @@ export default function CronsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
   const [thinking, setThinking] = useState<Thinking | null>(null);
   const [thinkingFor, setThinkingFor] = useState<string | null>(null);
   const [thinkingLoading, setThinkingLoading] = useState(false);
@@ -52,7 +54,22 @@ export default function CronsPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  const runsFor = (jobId: string) => runs.filter((r) => r.job_id === jobId).slice(0, 8);
+  // Filter by cron name / id / script — case-insensitive substring.
+  const filteredCrons = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return crons;
+    return crons.filter((c) => {
+      const cronId = c.job_id ?? c.id ?? "";
+      return (
+        c.name.toLowerCase().includes(q) ||
+        cronId.toLowerCase().includes(q) ||
+        (c.script ?? "").toLowerCase().includes(q)
+      );
+    });
+  }, [crons, filter]);
+
+  // History accordion: only the last 3 runs per job.
+  const runsFor = (jobId: string) => runs.filter((r) => r.job_id === jobId).slice(0, 3);
 
   const loadThinking = async (jobId: string, run?: Run) => {
     setThinkingLoading(true);
@@ -91,7 +108,7 @@ export default function CronsPage() {
       <div>
         <h1 className="text-2xl font-bold">Cron Monitor</h1>
         <p className="text-sm" style={{ color: "var(--text-dim)" }}>
-          Run history, agent thinking, and output links for every scheduled job. Hourly report keeps you posted.
+          Run history, agent thinking, and output links for every scheduled job. Times are always SAST.
         </p>
       </div>
 
@@ -118,8 +135,25 @@ export default function CronsPage() {
         </div>
       </div>
 
+      {/* Filter box */}
+      <div className="relative">
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2" style={{ color: "var(--text-faint)" }} />
+        <input
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter crons by name, id, or script…"
+          className="w-full rounded-lg border bg-transparent py-2.5 pl-9 pr-3 text-sm outline-none"
+          style={{ borderColor: "var(--card-border)", color: "var(--text)" }}
+        />
+      </div>
+
       <div className="space-y-3">
-        {crons.map((cron) => {
+        {filteredCrons.length === 0 && (
+          <div className="card p-6 text-center text-sm" style={{ color: "var(--text-faint)" }}>
+            No crons match “{filter}”.
+          </div>
+        )}
+        {filteredCrons.map((cron) => {
           const cronId = cron.job_id ?? cron.id ?? "unknown";
           const jobRuns = runsFor(cronId);
           const isOpen = expanded === cronId;
@@ -147,7 +181,7 @@ export default function CronsPage() {
                     )}
                   </div>
                   <div className="mt-0.5 text-xs" style={{ color: "var(--text-faint)" }}>
-                    {typeof cron.schedule === "string" ? cron.schedule : cron.schedule?.display ?? cron.schedule?.expr ?? "?"} · last {cron.last_run_at ? new Date(cron.last_run_at).toLocaleString("en-ZA", { timeZone: "Africa/Johannesburg" }) : "never"} · next {cron.next_run_at ? new Date(cron.next_run_at).toLocaleString("en-ZA", { timeZone: "Africa/Johannesburg" }) : "—"}
+                    {typeof cron.schedule === "string" ? cron.schedule : cron.schedule?.display ?? cron.schedule?.expr ?? "?"} · last {fmtSAST(cron.last_run_at)} · next {fmtSAST(cron.next_run_at)}
                   </div>
                 </div>
                 {isOpen ? <ChevronUp className="h-4 w-4 shrink-0" style={{ color: "var(--text-faint)" }} /> : <ChevronDown className="h-4 w-4 shrink-0" style={{ color: "var(--text-faint)" }} />}
@@ -155,9 +189,9 @@ export default function CronsPage() {
 
               {isOpen && (
                 <div className="border-t p-4" style={{ borderColor: "var(--card-border)" }}>
-                  {/* Run history */}
+                  {/* Run history — last 3 runs only */}
                   <h3 className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--text-faint)" }}>
-                    <Clock className="h-3.5 w-3.5" /> Run history
+                    <Clock className="h-3.5 w-3.5" /> Last 3 runs
                   </h3>
                   {jobRuns.length === 0 ? (
                     <div className="text-xs" style={{ color: "var(--text-faint)" }}>No runs in the last 25h.</div>
@@ -172,7 +206,7 @@ export default function CronsPage() {
                           ) : (
                             <Clock className="h-3.5 w-3.5" style={{ color: "var(--amber)" }} />
                           )}
-                          <span style={{ color: "var(--text-dim)" }}>{run.claimed_at?.replace("T", " ").slice(0, 16)}</span>
+                          <span style={{ color: "var(--text-dim)" }}>{fmtSASTSec(run.claimed_at)}</span>
                           <span className="font-medium">{run.status}</span>
                           {run.error && <span className="truncate font-mono" style={{ color: "var(--red)" }} title={run.error}>{run.error.slice(0, 80)}</span>}
                           {!cron.no_agent && (

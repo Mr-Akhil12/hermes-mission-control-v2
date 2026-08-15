@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { MessageSquare, RotateCcw, AlertCircle, CheckCircle2, Clock, Loader2 } from "lucide-react";
+import { fmtSAST } from "@/lib/time";
 
 type Session = {
   id: string;
@@ -30,8 +31,7 @@ export default function SessionsPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  const fmt = (ts: number | null) =>
-    ts ? new Date(ts * 1000).toLocaleString("en-ZA", { timeZone: "Africa/Johannesburg" }) : "—";
+  const fmt = (ts: number | null) => (ts ? fmtSAST(ts * 1000) : "—");
 
   const statusIcon = (s: Session) => {
     if (s.ended_at === null) return <Clock className="h-4 w-4" style={{ color: "var(--amber)" }} />;

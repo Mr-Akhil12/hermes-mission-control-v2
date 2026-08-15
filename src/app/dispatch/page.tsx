@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { Send, Loader2, CheckCircle2, XCircle, ListChecks, Clock, AlertTriangle } from "lucide-react";
+import { fmtSAST } from "@/lib/time";
 
 type Task = {
   id: string;
@@ -138,7 +139,7 @@ export default function DispatchPage() {
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm">{t.prompt}</div>
                     <div className="text-[10px]" style={{ color: "var(--text-faint)" }}>
-                      {t.profile} · {t.status} · {t.created_at ? new Date(t.created_at).toLocaleString("en-ZA", { timeZone: "Africa/Johannesburg" }) : ""}
+                      {t.profile} · {t.status} · {t.created_at ? fmtSAST(t.created_at) : ""}
                     </div>
                     {t.error && (
                       <div className="mt-1 flex items-start gap-1 text-[11px]" style={{ color: "var(--red)" }}>
