@@ -166,7 +166,12 @@ export default function ChatPage() {
       const res = await fetch("/api/chat/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        // Pin the session to the dashboard's model. Without this the API
+        // server persists its virtual model name ("hermes-agent") as the
+        // session model, which then beats the per-request model on every
+        // turn — ollama-cloud 404s on "hermes-agent" and the fallback
+        // chain silently lands on gemini-2.5-flash.
+        body: JSON.stringify({ model: MODEL }),
       });
       const data = await res.json();
       const id = data?.session?.id ?? data?.session_id ?? data?.data?.id;
