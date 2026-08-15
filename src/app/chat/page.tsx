@@ -60,6 +60,7 @@ export default function ChatPage() {
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
   const [titleDraft, setTitleDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  const reasoningRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
   const streamAbort = useRef<AbortController | null>(null);
   const liveRef = useRef(live);
@@ -195,34 +196,27 @@ export default function ChatPage() {
     scrollToBottom();
   }, [messages, busy, live, streamedText, scrollToBottom]);
 
+  // Keep the reasoning stream pinned to the bottom as it grows — the box is
+  // height-capped and scrolls internally, so it must follow the newest text
+  // instead of staying at the top.
+  useEffect(() => {
+    const el = reasoningRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [live.reasoning]);
+
   const newConversation = useCallback(async () => {
-    setBusy(true);
+    // Lazy creation: don't POST a session yet — an empty conversation with
+    // zero messages should never be saved. The session is created on the
+    // first send() instead. Just clear the UI and arm the composer.
     setError(null);
     setLive(IDLE_LIVE);
-    try {
-      const res = await fetch("/api/chat/sessions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // Pin the session to the dashboard's model. Without this the API
-        // server persists its virtual model name ("hermes-agent") as the
-        // session model, which then beats the per-request model on every
-        // turn — ollama-cloud 404s on "hermes-agent" and the fallback
-        // chain silently lands on gemini-2.5-flash.
-        body: JSON.stringify({ model: MODEL }),
-      });
-      const data = await res.json();
-      const id = data?.session?.id ?? data?.session_id ?? data?.data?.id;
-      if (!id) throw new Error("No session id returned");
-      if (activeId) draftsRef.current[activeId] = input;
-      setActiveId(id);
-      setMessages([]);
-      setStreamedText("");
-      await loadSessions();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
+    if (activeId) draftsRef.current[activeId] = input;
+    setActiveId(null);
+    setMessages([]);
+    setStreamedText("");
+    setInput("");
+    setComposerExpanded(false);
+    await loadSessions();
   }, [loadSessions, activeId, input]);
 
   // ── Slash command handling ──────────────────────────────────────────
@@ -596,13 +590,44 @@ export default function ChatPage() {
   const send = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed || !activeId) return;
+      if (!trimmed) return;
+
+      // Lazy session creation: if there's no active session yet (fresh
+      // "New conversation" that hasn't been typed into), create it now —
+      // only a conversation with an actual first message gets saved.
+      // Use a local sessionId so the rest of this function (stream fetch,
+      // reload) sees the freshly created id even though the state update
+      // hasn't re-rendered yet.
+      let sessionId = activeId;
+      if (!sessionId) {
+        try {
+          const res = await fetch("/api/chat/sessions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            // Pin the session to the dashboard's model. Without this the API
+            // server persists its virtual model name ("hermes-agent") as the
+            // session model, which then beats the per-request model on every
+            // turn — ollama-cloud 404s on "hermes-agent" and the fallback
+            // chain silently lands on gemini-2.5-flash.
+            body: JSON.stringify({ model: MODEL }),
+          });
+          const data = await res.json();
+          const id = data?.session?.id ?? data?.session_id ?? data?.data?.id;
+          if (!id) throw new Error("No session id returned");
+          sessionId = id;
+          setActiveId(id);
+          await loadSessions();
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e));
+          return;
+        }
+      }
 
       // Slash commands are handled locally (server-backed for info commands).
       if (trimmed.startsWith("/")) {
         const handled = await handleSlash(trimmed);
         if (handled) {
-          if (activeId) draftsRef.current[activeId] = "";
+          if (sessionId) draftsRef.current[sessionId] = "";
           setInput("");
           return;
         }
@@ -617,12 +642,12 @@ export default function ChatPage() {
           { role: "user", content: trimmed },
           { role: "system", content: "⏳ Queued — waiting for the current run to finish, then I'll pick this up." },
         ]);
-        if (activeId) draftsRef.current[activeId] = "";
+        if (sessionId) draftsRef.current[sessionId] = "";
         setInput("");
         return;
       }
 
-      if (activeId) draftsRef.current[activeId] = "";
+      if (sessionId) draftsRef.current[sessionId] = "";
       setInput("");
       setRetryTarget(trimmed);
       setMessages((m) => [...m, { role: "user", content: trimmed }]);
@@ -666,7 +691,7 @@ export default function ChatPage() {
       };
 
       try {
-        const res = await fetch(`/api/chat/sessions/${activeId}/stream`, {
+        const res = await fetch(`/api/chat/sessions/${sessionId}/stream`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: trimmed, model: MODEL }),
@@ -905,7 +930,7 @@ export default function ChatPage() {
         // refresh" feel on mobile). Skip it for a clean completion.
         if (!completedCleanly || !assistantAppended) {
           try {
-            await loadMessages(activeId);
+            if (sessionId) await loadMessages(sessionId);
           } catch {
             /* best-effort */
           }
@@ -1111,7 +1136,11 @@ export default function ChatPage() {
         <div className="max-w-[88%] min-w-0 rounded-2xl border px-4 py-2.5 text-sm" style={{ borderColor: "var(--card-border)", background: "color-mix(in srgb, var(--bg) 60%, transparent)", color: "var(--text)" }}>
           {usingBrowser && <BrowserView />}
           {showReasoning && (
-            <div className="mb-2 whitespace-pre-wrap rounded-lg border-l-2 px-2.5 py-1.5 text-xs leading-relaxed" style={{ borderLeftColor: "var(--accent)", background: "rgba(124,108,255,0.06)", color: "var(--text-dim)", maxHeight: 240, overflowY: "auto" }}>
+            <div
+              ref={reasoningRef}
+              className="mb-2 whitespace-pre-wrap rounded-lg border-l-2 px-2.5 py-1.5 text-xs leading-relaxed"
+              style={{ borderLeftColor: "var(--accent)", background: "rgba(124,108,255,0.06)", color: "var(--text-dim)", maxHeight: 240, overflowY: "auto" }}
+            >
               {displayReasoning}
               {settings.reasoning === "partial" && live.reasoning.length > 900 && (
                 <div className="mt-1 text-[10px] italic opacity-60">(preview mode — showing tail)</div>
@@ -1408,14 +1437,14 @@ export default function ChatPage() {
                   }
                 }}
                 rows={1}
-                placeholder={activeId ? "Message Hermes…  (type / for commands)" : "Start a new conversation first…"}
-                disabled={!activeId || busy}
+                placeholder={activeId ? "Message Hermes…  (type / for commands)" : "Type your first message to start…"}
+                disabled={busy}
                 className="min-w-0 flex-1 resize-none overflow-y-auto rounded-lg border bg-transparent px-3 py-2 text-sm leading-relaxed outline-none disabled:opacity-50"
                 style={{ borderColor: "var(--card-border)", color: "var(--text)", maxHeight: 120 }}
               />
               <button
                 onClick={() => setComposerExpanded((v) => !v)}
-                disabled={!activeId}
+                disabled={busy}
                 className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border disabled:opacity-40"
                 style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}
                 aria-label={composerExpanded ? "Collapse composer" : "Expand composer"}
@@ -1425,7 +1454,7 @@ export default function ChatPage() {
               </button>
               <button
                 onClick={() => (busy ? stopRun() : send(input))}
-                disabled={!busy && (!input.trim() || !activeId)}
+                disabled={!busy && !input.trim()}
                 className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-white disabled:opacity-50"
                 style={{ background: busy ? "rgba(255,92,92,0.85)" : "linear-gradient(135deg, var(--accent), var(--accent-2))" }}
                 aria-label={busy ? "Stop" : "Send"}
