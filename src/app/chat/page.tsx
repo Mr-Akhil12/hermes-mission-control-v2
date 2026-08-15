@@ -919,6 +919,7 @@ export default function ChatPage() {
     rec.interimResults = true;
     rec.continuous = true;
     let finalText = "";
+    let lastIndex = 0;
     let silenceTimer: ReturnType<typeof setTimeout> | null = null;
     const stopAndSend = () => {
       if (silenceTimer) {
@@ -936,10 +937,17 @@ export default function ChatPage() {
     };
     rec.onresult = (e: any) => {
       let interim = "";
-      for (let i = e.resultIndex; i < e.results.length; i++) {
+      // Chrome re-fires onresult with the SAME final results on every event.
+      // Only consume results we haven't seen yet (index >= lastIndex) so
+      // continuous mode never stacks duplicates of the same phrase.
+      for (let i = Math.max(e.resultIndex, lastIndex); i < e.results.length; i++) {
         const r = e.results[i];
-        if (r.isFinal) finalText += r[0].transcript + " ";
-        else interim += r[0].transcript;
+        if (r.isFinal) {
+          finalText += r[0].transcript + " ";
+          lastIndex = i + 1;
+        } else {
+          interim += r[0].transcript;
+        }
       }
       // Show live interim text so it feels responsive, but don't send yet.
       setInput((finalText + interim).trim());
