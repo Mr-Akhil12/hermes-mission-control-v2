@@ -883,6 +883,15 @@ export default function ChatPage() {
         try {
           const synth = window.speechSynthesis;
           const utter = new SpeechSynthesisUtterance(full.replace(/[#*`>]/g, "").slice(0, 400));
+          // Match the Discord voice: en-GB-RyanNeural at 1.2x.
+          const voices = synth.getVoices();
+          const ryan =
+            voices.find((v) => v.name.includes("Ryan") && v.lang.startsWith("en-GB")) ||
+            voices.find((v) => v.name.includes("Ryan")) ||
+            voices.find((v) => v.lang.startsWith("en-GB"));
+          if (ryan) utter.voice = ryan;
+          utter.lang = ryan?.lang ?? "en-GB";
+          utter.rate = 1.2;
           synth.speak(utter);
         } catch {
           /* TTS unavailable */
@@ -907,14 +916,57 @@ export default function ChatPage() {
     }
     const rec = new SR();
     rec.lang = "en-ZA";
-    rec.interimResults = false;
-    rec.onresult = (e: any) => {
-      const text = e.results?.[0]?.[0]?.transcript ?? "";
-      setInput(text);
-      if (text.trim()) send(text);
+    rec.interimResults = true;
+    rec.continuous = true;
+    let finalText = "";
+    let silenceTimer: ReturnType<typeof setTimeout> | null = null;
+    const stopAndSend = () => {
+      if (silenceTimer) {
+        clearTimeout(silenceTimer);
+        silenceTimer = null;
+      }
+      rec.stop();
+      setListening(false);
+      const text = finalText.trim();
+      finalText = "";
+      if (text) {
+        setInput(text);
+        send(text);
+      }
     };
-    rec.onend = () => setListening(false);
-    rec.onerror = () => setListening(false);
+    rec.onresult = (e: any) => {
+      let interim = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const r = e.results[i];
+        if (r.isFinal) finalText += r[0].transcript + " ";
+        else interim += r[0].transcript;
+      }
+      // Show live interim text so it feels responsive, but don't send yet.
+      setInput((finalText + interim).trim());
+      // Restart the silence timer on every new speech — 1.6s of quiet = done talking.
+      if (silenceTimer) clearTimeout(silenceTimer);
+      silenceTimer = setTimeout(stopAndSend, 1600);
+    };
+    rec.onend = () => {
+      if (silenceTimer) {
+        clearTimeout(silenceTimer);
+        silenceTimer = null;
+      }
+      setListening(false);
+      const text = finalText.trim();
+      finalText = "";
+      if (text) {
+        setInput(text);
+        send(text);
+      }
+    };
+    rec.onerror = () => {
+      if (silenceTimer) {
+        clearTimeout(silenceTimer);
+        silenceTimer = null;
+      }
+      setListening(false);
+    };
     recognitionRef.current = rec;
     rec.start();
     setListening(true);
