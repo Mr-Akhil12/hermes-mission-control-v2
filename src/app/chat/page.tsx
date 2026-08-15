@@ -607,6 +607,11 @@ export default function ChatPage() {
       let runUsage: RunStats["usage"] = null;
       let runRuntime: RunStats["runtime"] = null;
       let startedAt = Date.now();
+      // True when the authoritative run.completed event arrived. When it does,
+      // the local message list + stats are already correct, so we can skip the
+      // full server reload in finally (which replaces the whole array and
+      // forces every bubble to re-render = the "full screen refresh" feel).
+      let completedCleanly = false;
 
       const bumpLive = (patch: Partial<LiveState>) => {
         setLive((prev) => ({ ...prev, ...patch }));
@@ -680,6 +685,23 @@ export default function ChatPage() {
                   // full list re-render on mobile (shimmer/refresh feel).
                   setStreamedText(full);
                   if (liveRef.current.phase !== "tools") bumpLive({ phase: "streaming" });
+                  // Live token estimate so the footer's output-token count
+                  // ticks up in real time instead of only appearing at the
+                  // end. ~4 chars/token is a rough heuristic; the exact
+                  // number is replaced by run.completed.usage when it lands.
+                  const estOut = Math.max(1, Math.round(full.length / 4));
+                  bumpLive({
+                    stats: {
+                      ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }),
+                      toolCount,
+                      failedTools: failedCount,
+                      usage: {
+                        ...(liveRef.current.stats?.usage ?? {}),
+                        output_tokens: estOut,
+                        total_tokens: (liveRef.current.stats?.usage?.input_tokens ?? 0) + estOut,
+                      },
+                    },
+                  });
                 }
                 break;
               }
@@ -762,6 +784,7 @@ export default function ChatPage() {
               case "run.completed": {
                 runUsage = (payload as any).usage ?? null;
                 runRuntime = (payload as any).runtime ?? runRuntime;
+                completedCleanly = true;
                 const completedAt = Date.now();
                 bumpLive({
                   phase: "done",
@@ -814,13 +837,17 @@ export default function ChatPage() {
                 },
               }
         );
-        // Reconcile against ground truth: the agent may have completed and
-        // persisted the reply even if the tail of the SSE stream was dropped
-        // (Vercel/ngrok timeouts). Reload from the server so nothing is lost.
-        try {
-          await loadMessages(activeId);
-        } catch {
-          /* best-effort */
+        // Reconcile against ground truth ONLY when the SSE tail was dropped
+        // (run.completed never arrived). When it did arrive, the local message
+        // list + stats are already correct — reloading here would replace the
+        // whole array and force every bubble to re-render (the "full screen
+        // refresh" feel on mobile). Skip it for a clean completion.
+        if (!completedCleanly) {
+          try {
+            await loadMessages(activeId);
+          } catch {
+            /* best-effort */
+          }
         }
         await loadSessions();
 

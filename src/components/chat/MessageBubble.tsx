@@ -3,13 +3,13 @@
 // Message bubble with reasoning disclosure, tool-call chips and markdown-lite
 // rendering. Reasoning display respects the user's setting.
 
-import { useState } from "react";
+import { memo, useState } from "react";
 import { Brain, ChevronDown, ChevronRight } from "lucide-react";
 import type { ChatSettings, ChatMsg, ToolEvent } from "@/lib/chat-types";
 import { ToolCallStack } from "./ToolCalls";
 
 /** Tiny markdown renderer: **bold**, `code`, ```fences```, *italic*, links. */
-export function MarkdownLite({ text }: { text: string }) {
+export const MarkdownLite = memo(function MarkdownLite({ text }: { text: string }) {
   const parts = text.split(/(```[\s\S]*?```|`[^`\n]+`|\*\*[^*]+\*\*|\*[^*\n]+\*|\[[^\]]+\]\([^)]+\))/g);
 
   return (
@@ -71,7 +71,7 @@ export function MarkdownLite({ text }: { text: string }) {
       })}
     </>
   );
-}
+});
 
 function ReasoningBlock({ text, mode }: { text: string; mode: ChatSettings["reasoning"] }) {
   const [open, setOpen] = useState(false);
@@ -113,7 +113,7 @@ function ReasoningBlock({ text, mode }: { text: string; mode: ChatSettings["reas
   );
 }
 
-export function MessageBubble({
+export const MessageBubble = memo(function MessageBubble({
   msg,
   settings,
   tools,
@@ -162,4 +162,4 @@ export function MessageBubble({
       </div>
     </div>
   );
-}
+});
