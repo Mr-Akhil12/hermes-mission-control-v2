@@ -1014,14 +1014,15 @@ export default function ChatPage() {
         <div className="flex min-h-0 flex-1">
           {/* Conversation sidebar — slides in as a full-height overlay */}
           <div
-            className={`${sidebarOpen ? "translate-x-0" : "-translate-x-full"} transition-transform duration-200 ease-out`}
+            className={`${sidebarOpen ? "translate-x-0" : "-translate-x-full"} w-full transition-transform duration-200 ease-out md:w-56`}
             style={{
               position: "absolute",
               top: 0,
               left: 0,
-              width: "100%",
               height: "100%",
               zIndex: 10,
+              display: "flex",
+              flexDirection: "column",
               background: "color-mix(in srgb, var(--bg-2) 97%, transparent)",
               backdropFilter: "blur(2px)",
               borderRight: sidebarOpen ? "1px solid var(--card-border)" : "none",
