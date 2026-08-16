@@ -75,13 +75,13 @@ export const Composer = memo(function Composer({
         }}
         rows={1}
         placeholder={activeId ? "Message Hermes…  (type / for commands)" : "Type your first message to start…"}
-        disabled={busy}
+        disabled={false}
         className="min-w-0 flex-1 resize-none overflow-y-auto rounded-lg border bg-transparent px-3 py-2 text-sm leading-relaxed outline-none disabled:opacity-50"
         style={{ borderColor: "var(--card-border)", color: "var(--text)", maxHeight: 120 }}
       />
       <button
         onClick={() => setComposerExpanded((v) => !v)}
-        disabled={busy}
+        disabled={false}
         className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border disabled:opacity-40"
         style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}
         aria-label={composerExpanded ? "Collapse composer" : "Expand composer"}

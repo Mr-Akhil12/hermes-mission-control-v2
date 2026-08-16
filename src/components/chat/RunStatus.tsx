@@ -56,9 +56,32 @@ function fmtDuration(ms?: number) {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
-export function RunStatsFooter({ stats, phase }: { stats: RunStats | null; phase: RunPhase }) {
+export function RunStatsFooter({
+  stats,
+  phase,
+  contextWindow,
+}: {
+  stats: RunStats | null;
+  phase: RunPhase;
+  contextWindow?: number;
+}) {
   const live =
     stats && phase !== "done" && phase !== "error" && phase !== "idle";
+
+  // Context % — used tokens / model max, rendered as a small pie + "41% / 512k".
+  const maxTokens = contextWindow && contextWindow > 0 ? contextWindow : 0;
+  const usedTokens = stats?.usage?.total_tokens ?? 0;
+  const pct = maxTokens > 0 ? Math.min(100, Math.round((usedTokens / maxTokens) * 100)) : 0;
+  const ctxLabel = maxTokens > 0
+    ? `${usedTokens.toLocaleString()} / ${maxTokens >= 1_000_000 ? `${(maxTokens / 1_000_000).toFixed(0)}M` : `${(maxTokens / 1000).toFixed(0)}k`}`
+    : "—";
+  // Pie: conic-gradient ring showing the % filled.
+  const pieStyle =
+    maxTokens > 0
+      ? {
+          background: `conic-gradient(var(--accent) ${pct * 3.6}deg, rgba(124,108,255,0.15) ${pct * 3.6}deg 360deg)`,
+        }
+      : { background: "rgba(124,108,255,0.15)" };
 
   return (
     <div
@@ -74,6 +97,8 @@ export function RunStatsFooter({ stats, phase }: { stats: RunStats | null; phase
       </span>
       <span className="flex items-center gap-1">
         <BarChart3 className="h-3 w-3" />
+        {/* Model is PERMANENT: shows the last known runtime model even when
+            idle, so the current model is always visible in the bottom bar. */}
         {stats?.runtime?.model ? (
           <>
             <span style={{ color: "var(--accent-2)" }}>{stats.runtime.model}</span>
@@ -93,6 +118,15 @@ export function RunStatsFooter({ stats, phase }: { stats: RunStats | null; phase
       </span>
       <span className="flex items-center gap-1">
         Σ {fmtTokens(stats?.usage?.total_tokens)}
+      </span>
+      <span className="flex items-center gap-1.5" title={`Context used: ${pct}% of ${maxTokens.toLocaleString()} tokens`}>
+        <span
+          className="inline-block h-3 w-3 rounded-full"
+          style={pieStyle}
+        />
+        <span style={{ color: pct > 85 ? "var(--red)" : pct > 60 ? "var(--amber, #f5a623)" : undefined }}>
+          {pct}% / {ctxLabel}
+        </span>
       </span>
       <span className="ml-auto">
         {live ? "running…" : `${fmtDuration(stats?.durationMs)} total`}

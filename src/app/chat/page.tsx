@@ -17,6 +17,30 @@ import { ChainView } from "@/components/chat/ChainView";
 
 const MODEL = "deepseek-v4-flash:0731";
 
+// Context window (max input tokens) per model — used for the footer's
+// context % pie. Unknown models fall back to the default.
+const CONTEXT_WINDOWS: Record<string, number> = {
+  "deepseek-v4-flash:0731": 1_000_000,
+  "deepseek-v4-flash": 1_000_000,
+  "deepseek-v3.2": 131_072,
+  "gemini-2.5-flash": 1_048_576,
+  "gemini-3.7-flash": 1_048_576,
+  "minimax-m2.7": 204_800,
+  "claude-sonnet-4": 1_000_000,
+  "gpt-5.6-sol": 400_000,
+};
+const CONTEXT_WINDOW_DEFAULT = 1_000_000;
+
+// Resolve a model's context window (max input tokens) for the footer pie.
+function contextWindowFor(model?: string | null): number {
+  if (!model) return CONTEXT_WINDOW_DEFAULT;
+  const key = model.toLowerCase();
+  for (const [name, w] of Object.entries(CONTEXT_WINDOWS)) {
+    if (key.includes(name.toLowerCase())) return w;
+  }
+  return CONTEXT_WINDOW_DEFAULT;
+}
+
 type LiveState = {
   phase: RunPhase;
   reasoning: string;
@@ -607,8 +631,19 @@ export default function ChatPage() {
           setMessages((m) => [...m, { role: "system", content: "Context compression is automatic (threshold-based). This session's history is managed by Hermes — nothing to do manually." }]);
           return true;
         }
+        case "queue": {
+          // Turn-boundary queue: the message fires as a normal send once the
+          // current run completes (client-side, not routed through the WS
+          // bridge's orphan session).
+          if (!arg) {
+            setMessages((m) => [...m, { role: "system", content: "Usage: `/queue <message>` — sends after the current run finishes." }]);
+            return true;
+          }
+          pendingQueue.current.push(arg);
+          setMessages((m) => [...m, { role: "user", content: arg }, { role: "system", content: "⏳ Queued — I'll pick this up after the current run finishes." }]);
+          return true;
+        }
         case "background":
-        case "queue":
         case "steer":
         case "goal":
         case "learn":
@@ -711,17 +746,32 @@ export default function ChatPage() {
         }
       }
 
-      // Never drop messages silently: if a run is active, queue the message
-      // and surface it in the UI so the user knows it's waiting.
+      // If a run is active, a plain send STEERS the running agent instead of
+      // queueing: the message lands in the next tool-result boundary (same as
+      // /steer) — Akhil's preferred UX: keep typing while I work, and what you
+      // send is a live correction, not a queued message. /queue still exists
+      // explicitly for turn-boundary queuing.
       if (busyRef.current) {
-        pendingQueue.current.push(trimmed);
+        if (sessionId) draftsRef.current[sessionId] = "";
+        setInput("");
         setMessages((m) => [
           ...m,
           { role: "user", content: trimmed },
-          { role: "system", content: "⏳ Queued — waiting for the current run to finish, then I'll pick this up." },
+          { role: "system", content: "⏩ Steered — I'll fold this in after the current tool call." },
         ]);
-        if (sessionId) draftsRef.current[sessionId] = "";
-        setInput("");
+        try {
+          const res = await fetch("/api/chat/command", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ command: `/steer ${trimmed}`, session_id: sessionId }),
+          });
+          const data = await res.json();
+          if (data?.output && !data.output.includes("No live agent")) {
+            setMessages((m) => [...m, { role: "system", content: data.output }]);
+          }
+        } catch {
+          // Steer failed silently — the run continues; the user can /stop or /queue.
+        }
         return;
       }
 
@@ -749,6 +799,10 @@ export default function ChatPage() {
       let toolCount = 0;
       let failedCount = 0;
       let toolEvents: ToolEvent[] = [];
+      // Ordered live chain accumulator — updated on EVERY event locally so a
+      // burst of SSE frames (reasoning + tools in the same batch) accumulates
+      // correctly instead of reading the stale rendered snapshot each time.
+      let chain: ChainSegment[] = [];
       let full = "";
       let runUsage: RunStats["usage"] = null;
       let runRuntime: RunStats["runtime"] = null;
@@ -880,12 +934,10 @@ export default function ChatPage() {
                 if (tname === "_thinking") {
                   if (delta) {
                     reasoning += delta;
-                    // Ordered chain: reasoning text accumulates into the LAST
-                    // reasoning segment (or starts one). Tools keep their own
-                    // segment, so reasoning never disappears when a tool fires.
+                    chain = appendReasoningToChain(chain, delta);
                     bumpLive({
                       reasoning,
-                      chain: appendReasoningToChain(liveRef.current.chain, delta),
+                      chain,
                       phase: liveRef.current.phase === "initializing" ? "thinking" : liveRef.current.phase,
                     });
                   }
@@ -896,12 +948,11 @@ export default function ChatPage() {
                     const te: ToolEvent = { name: tname, startedAt: Date.now() };
                     toolEvents = [...toolEvents, te];
                     toolCount += 1;
+                    chain = [...chain, { kind: "tool", tool: te }];
                     bumpLive({
                       tools: toolEvents,
                       toolCount,
-                      // Append the tool to the ordered chain right after the
-                      // reasoning that preceded it.
-                      chain: [...liveRef.current.chain, { kind: "tool", tool: te }],
+                      chain,
                       phase: "tools",
                       stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount },
                     });
@@ -927,9 +978,9 @@ export default function ChatPage() {
                   toolCount,
                   // Ensure the tool is in the ordered chain even if a
                   // tool.started raced ahead of tool.progress.
-                  chain: te && !liveRef.current.chain.some((c) => c.kind === "tool" && c.tool === te)
-                    ? [...liveRef.current.chain, { kind: "tool", tool: te }]
-                    : liveRef.current.chain,
+                  chain: te && !chain.some((c) => c.kind === "tool" && c.tool === te)
+                    ? (chain = [...chain, { kind: "tool", tool: te }])
+                    : chain,
                   phase: "tools",
                   stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount },
                 });
@@ -946,12 +997,12 @@ export default function ChatPage() {
                 );
                 if (isErr) failedCount += 1;
                 // Sync the same completion into the ordered chain's tool segment.
-                const chainSynced = liveRef.current.chain.map((c) =>
+                chain = chain.map((c) =>
                   c.kind === "tool" && c.tool.name === tname && c.tool.durationMs === undefined
                     ? { ...c, tool: { ...c.tool, durationMs: durMs, error: isErr } }
                     : c
                 );
-                bumpLive({ tools: toolEvents, failedCount, chain: chainSynced, stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
+                bumpLive({ tools: toolEvents, failedCount, chain, stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
                 break;
               }
               case "tool.failed": {
@@ -962,12 +1013,12 @@ export default function ChatPage() {
                     : t
                 );
                 failedCount += 1;
-                const chainFailed = liveRef.current.chain.map((c) =>
+                chain = chain.map((c) =>
                   c.kind === "tool" && c.tool.name === tname && c.tool.durationMs === undefined
                     ? { ...c, tool: { ...c.tool, durationMs: Date.now() - c.tool.startedAt, error: true } }
                     : c
                 );
-                bumpLive({ tools: toolEvents, failedCount, chain: chainFailed, stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
+                bumpLive({ tools: toolEvents, failedCount, chain, stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
                 break;
               }
               case "assistant.completed": {
@@ -1588,10 +1639,11 @@ export default function ChatPage() {
       <div className="flex justify-start">
         <div className="max-w-[88%] min-w-0 rounded-2xl border px-4 py-2.5 text-sm" style={{ borderColor: "var(--card-border)", background: "color-mix(in srgb, var(--bg) 60%, transparent)", color: "var(--text)" }}>
           {usingBrowser && <BrowserView />}
-          {showReasoning && chainSegments.length > 0 && (
+          {chainSegments.length > 0 && (
             <div className="mb-2 space-y-2">
               {chainSegments.map((seg, i) =>
                 seg.kind === "reasoning" ? (
+                  settings.reasoning !== "hidden" ? (
                   <div
                     key={`r-${i}`}
                     className="whitespace-pre-wrap rounded-lg border-l-2 px-2.5 py-1.5 text-xs leading-relaxed"
@@ -1602,6 +1654,7 @@ export default function ChatPage() {
                       <div className="mt-1 text-[10px] italic opacity-60">(preview mode — showing tail)</div>
                     )}
                   </div>
+                  ) : null
                 ) : (
                   <div key={`t-${i}`} className="flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs" style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}>
                     {seg.tool.durationMs !== undefined ? (
@@ -1963,6 +2016,7 @@ export default function ChatPage() {
               <RunStatsFooter
                 stats={live.phase !== "idle" && live.stats ? live.stats : lastStats}
                 phase={live.phase !== "idle" ? live.phase : "done"}
+                contextWindow={contextWindowFor((live.phase !== "idle" && live.stats?.runtime?.model) || lastStats?.runtime?.model || MODEL)}
               />
             </div>
 
