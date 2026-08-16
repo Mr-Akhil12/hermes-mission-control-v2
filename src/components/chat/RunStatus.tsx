@@ -89,13 +89,6 @@ export function RunStatsFooter({
       style={{ borderColor: "var(--card-border)", color: "var(--text-faint)" }}
     >
       <span className="flex items-center gap-1">
-        <Wrench className="h-3 w-3" />
-        {stats?.toolCount ?? 0} tool{stats?.toolCount === 1 ? "" : "s"}
-        {stats && stats.failedTools > 0 && (
-          <span style={{ color: "var(--red)" }}> · {stats.failedTools} failed</span>
-        )}
-      </span>
-      <span className="flex items-center gap-1">
         <BarChart3 className="h-3 w-3" />
         {/* Model is PERMANENT: shows the last known runtime model even when
             idle, so the current model is always visible in the bottom bar. */}
@@ -110,15 +103,6 @@ export function RunStatsFooter({
           "—"
         )}
       </span>
-      <span className="flex items-center gap-1">
-        ⬇ {fmtTokens(stats?.usage?.input_tokens)}
-      </span>
-      <span className="flex items-center gap-1">
-        ⬆ {fmtTokens(stats?.usage?.output_tokens)}
-      </span>
-      <span className="flex items-center gap-1">
-        Σ {fmtTokens(stats?.usage?.total_tokens)}
-      </span>
       <span className="flex items-center gap-1.5" title={`Context used: ${pct}% of ${maxTokens.toLocaleString()} tokens`}>
         <span
           className="inline-block h-3 w-3 rounded-full"
@@ -127,6 +111,15 @@ export function RunStatsFooter({
         <span style={{ color: pct > 85 ? "var(--red)" : pct > 60 ? "var(--amber, #f5a623)" : undefined }}>
           {pct}% / {ctxLabel}
         </span>
+      </span>
+      <span className="flex items-center gap-1" title="Input tokens (context)">
+        ⬇ {fmtTokens(stats?.usage?.input_tokens)}
+      </span>
+      <span className="flex items-center gap-1" title="Output tokens">
+        ⬆ {fmtTokens(stats?.usage?.output_tokens)}
+      </span>
+      <span className="flex items-center gap-1" title="Total tokens">
+        Σ {fmtTokens(stats?.usage?.total_tokens)}
       </span>
       <span className="ml-auto">
         {live ? "running…" : `${fmtDuration(stats?.durationMs)} total`}
