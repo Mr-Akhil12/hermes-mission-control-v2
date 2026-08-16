@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Send, Mic, MicOff, Volume2, MessageSquare, Plus, ChevronLeft, ChevronRight,
-  Loader2, Trash2, Pencil, Square, Maximize2, Minimize2,
+  Loader2, Trash2, Pencil, Square, CheckSquare, X, Maximize2, Minimize2,
 } from "lucide-react";
 import type { ChatMsg, ChatSettings, SessionMeta, StreamEvent, ToolEvent, RunStats } from "@/lib/chat-types";
 import { MessageBubble, MarkdownLite } from "@/components/chat/MessageBubble";
@@ -52,6 +52,9 @@ export default function ChatPage() {
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sessionFilter, setSessionFilter] = useState<"chats" | "all">("chats");
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
   const [live, setLive] = useState<LiveState>(IDLE_LIVE);
   const [lastStats, setLastStats] = useState<RunStats | null>(null);
   const [settings, setSettings] = useState<ChatSettings>(DEFAULT_SETTINGS);
@@ -1135,6 +1138,76 @@ export default function ChatPage() {
     [loadSessions]
   );
 
+  // ── Multi-select delete ─────────────────────────────────────────────
+  // Long-press (mobile) or the select toggle (desktop) enters selection
+  // mode; checkboxes appear and multiple conversations can be deleted at
+  // once. Tap outside / X exits without deleting.
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressTriggered = useRef(false);
+
+  const startLongPress = useCallback((id: string) => {
+    longPressTriggered.current = false;
+    longPressTimer.current = setTimeout(() => {
+      longPressTriggered.current = true;
+      setSelectMode(true);
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.add(id);
+        return next;
+      });
+    }, 450);
+  }, []);
+
+  const cancelLongPress = useCallback(() => {
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  }, []);
+
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const exitSelectMode = useCallback(() => {
+    cancelLongPress();
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  }, [cancelLongPress]);
+
+  const deleteSelected = useCallback(async () => {
+    if (selectedIds.size === 0) return;
+    setDeleting(true);
+    try {
+      await Promise.all(
+        [...selectedIds].map((id) =>
+          fetch(`/api/chat/sessions/${id}`, { method: "DELETE" })
+        )
+      );
+      selectedIds.forEach((id) => delete draftsRef.current[id]);
+      const list = await loadSessions();
+      if (selectedIds.has(activeId ?? "")) {
+        if (list.length > 0) {
+          setActiveId(list[0].id);
+          loadMessages(list[0].id);
+        } else {
+          setActiveId(null);
+          setMessages([]);
+        }
+      }
+      exitSelectMode();
+    } catch (err: any) {
+      setError(`Delete failed: ${err?.message ?? err}`);
+    } finally {
+      setDeleting(false);
+    }
+  }, [selectedIds, activeId, loadSessions, loadMessages, exitSelectMode]);
+
   const renderLiveContent = () => {
     if (live.phase === "idle") return null;
     const showReasoning =
@@ -1252,17 +1325,58 @@ export default function ChatPage() {
             }}
           >
               <div className="flex items-center justify-between px-3 py-2">
-                <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>
-                  Conversations
-                </span>
-                <button
-                  onClick={() => setSidebarOpen(false)}
-                  className="rounded p-1"
-                  style={{ color: "var(--text-faint)" }}
-                  aria-label="Hide sidebar"
-                >
-                  <ChevronLeft className="h-4 w-4" />
-                </button>
+                {selectMode ? (
+                  <>
+                    <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--accent)" }}>
+                      {selectedIds.size} selected
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={deleteSelected}
+                        disabled={deleting || selectedIds.size === 0}
+                        className="flex items-center gap-1 rounded px-2 py-1 text-[10px] font-semibold"
+                        style={{ color: "var(--red)", background: "rgba(255,80,80,0.1)" }}
+                        aria-label="Delete selected"
+                      >
+                        {deleting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                        Delete
+                      </button>
+                      <button
+                        onClick={exitSelectMode}
+                        className="rounded p-1"
+                        style={{ color: "var(--text-faint)" }}
+                        aria-label="Cancel selection"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>
+                      Conversations
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => setSelectMode(true)}
+                        className="rounded p-1"
+                        style={{ color: "var(--text-faint)" }}
+                        aria-label="Select conversations"
+                        title="Select multiple"
+                      >
+                        <CheckSquare className="h-4 w-4" />
+                      </button>
+                      <button
+                        onClick={() => setSidebarOpen(false)}
+                        className="rounded p-1"
+                        style={{ color: "var(--text-faint)" }}
+                        aria-label="Hide sidebar"
+                      >
+                        <ChevronLeft className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
               <div className="flex gap-1 px-2 pb-1">
                 {(["chats", "all"] as const).map((f) => (
@@ -1313,15 +1427,55 @@ export default function ChatPage() {
                       key={s.id}
                       role="button"
                       tabIndex={0}
-                      onClick={() => selectSession(s.id)}
-                      onKeyDown={(e) => e.key === "Enter" && selectSession(s.id)}
-                      className="group w-full cursor-pointer rounded-lg px-3 py-2 text-left text-xs"
+                      onClick={() => {
+                        if (selectMode) {
+                          toggleSelect(s.id);
+                          return;
+                        }
+                        if (longPressTriggered.current) {
+                          longPressTriggered.current = false;
+                          return;
+                        }
+                        selectSession(s.id);
+                      }}
+                      onKeyDown={(e) => e.key === "Enter" && (selectMode ? toggleSelect(s.id) : selectSession(s.id))}
+                      onPointerDown={() => {
+                        if (!selectMode) startLongPress(s.id);
+                      }}
+                      onPointerUp={cancelLongPress}
+                      onPointerLeave={cancelLongPress}
+                      onPointerCancel={cancelLongPress}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        if (!selectMode) {
+                          setSelectMode(true);
+                          setSelectedIds((prev) => {
+                            const next = new Set(prev);
+                            next.add(s.id);
+                            return next;
+                          });
+                        }
+                      }}
+                      className="group relative w-full cursor-pointer rounded-lg px-3 py-2 text-left text-xs"
                       style={
-                        s.id === activeId
-                          ? { background: "rgba(124,108,255,0.12)", color: "var(--text)" }
-                          : { color: "var(--text-dim)" }
+                        selectMode
+                          ? selectedIds.has(s.id)
+                            ? { background: "rgba(124,108,255,0.18)", color: "var(--text)" }
+                            : { color: "var(--text-dim)" }
+                          : s.id === activeId
+                            ? { background: "rgba(124,108,255,0.12)", color: "var(--text)" }
+                            : { color: "var(--text-dim)" }
                       }
                     >
+                      {selectMode && (
+                        <span className="mr-2 inline-flex align-middle">
+                          {selectedIds.has(s.id) ? (
+                            <CheckSquare className="h-4 w-4" style={{ color: "var(--accent)" }} />
+                          ) : (
+                            <Square className="h-4 w-4" style={{ color: "var(--text-faint)" }} />
+                          )}
+                        </span>
+                      )}
                       {editingTitle === s.id ? (
                         <input
                           autoFocus
@@ -1361,7 +1515,7 @@ export default function ChatPage() {
                           </div>
                         </>
                       )}
-                      {editingTitle !== s.id && (
+                      {editingTitle !== s.id && !selectMode && (
                         <div className="absolute right-1 top-1 hidden gap-0.5 group-hover:flex">
                           <button
                             onClick={(e) => {
