@@ -1033,6 +1033,194 @@ export default function ChatPage() {
 
   sendRef.current = send;
 
+  // ── Reattach: resume a live run after leaving/re-entering ───────────
+  // The server keeps the run alive on SSE disconnect and persists every
+  // event with a seq (GET /api/sessions/{id}/events?since=N replays missed
+  // frames then tails live). This reattaches on page return / tab focus /
+  // device switch so the stream keeps flowing like Claude/ChatGPT — no
+  // refresh needed, and a second device can join mid-run.
+  const lastSeqRef = useRef<Record<string, number>>({});
+  const reattachAbort = useRef<AbortController | null>(null);
+
+  const reattachRun = useCallback(
+    async (sessionId: string) => {
+      if (!sessionId) return;
+      // Don't double-attach if we're already streaming this session.
+      if (streamSessionRef.current === sessionId && busyRef.current) return;
+      try {
+        const res = await fetch(`/api/chat/sessions/${sessionId}/events?since=${lastSeqRef.current[sessionId] ?? 0}`, {
+          cache: "no-store",
+        });
+        if (!res.ok || !res.body) return;
+        // Server returned an empty/closed stream when no run is live.
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let livePhase = false;
+        setBusy(true);
+        streamSessionRef.current = sessionId;
+        // Preserve prior live state so late subscribers keep prior tools.
+        const prev = liveBySessionRef.current[sessionId]?.live;
+        if (prev && prev.phase !== "idle" && prev.phase !== "done") {
+          setLive(prev);
+        } else {
+          setLive((p) => (p.phase === "idle" ? { ...p, phase: "thinking" } : p));
+        }
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const frames = buffer.split("\n\n");
+          buffer = frames.pop() ?? "";
+          for (const frame of frames) {
+            const lines = frame.split("\n");
+            const eventLine = lines.find((l) => l.startsWith("event:"));
+            const dataLine = lines.find((l) => l.startsWith("data:"));
+            if (!dataLine) continue;
+            const event = (eventLine?.slice(6).trim() ?? "message") as string;
+            let payload: any;
+            try {
+              payload = JSON.parse(dataLine.slice(5).trim());
+            } catch {
+              continue;
+            }
+            if (!payload.event) payload = { ...payload, event };
+            lastSeqRef.current[sessionId] = payload.seq ?? lastSeqRef.current[sessionId] ?? 0;
+            if (payload.event === "run.started" || payload.event === "message.started") {
+              livePhase = true;
+              setLive((p) => ({ ...p, phase: "thinking" }));
+            } else if (payload.event === "assistant.delta") {
+              livePhase = true;
+              setLive((p) => {
+                const next = { ...p, phase: "streaming" as const, stats: p.stats ?? null };
+                const prevText = liveBySessionRef.current[sessionId]?.streamedText ?? "";
+                const text = prevText + (payload.delta ?? "");
+                // Keep a local accumulation via functional state snapshot.
+                liveBySessionRef.current[sessionId] = { live: next, streamedText: text };
+                return next;
+              });
+              setStreamedText((t) => t + (payload.delta ?? ""));
+            } else if (payload.event === "tool.started" || payload.event === "tool.progress") {
+              livePhase = true;
+              const tname = payload.tool_name ?? "tool";
+              setLive((p) => {
+                const tools = [...p.tools];
+                const exists = tools.find((t) => t.name === tname && t.durationMs === undefined);
+                if (!exists) tools.push({ name: tname, startedAt: Date.now() });
+                const next = { ...p, phase: "tools" as const, tools, toolCount: tools.length };
+                liveBySessionRef.current[sessionId] = { live: next, streamedText: liveBySessionRef.current[sessionId]?.streamedText ?? "" };
+                return next;
+              });
+            } else if (payload.event === "tool.completed" || payload.event === "tool.failed") {
+              const tname = payload.tool_name ?? "tool";
+              const isErr = payload.event === "tool.failed" || !!payload.is_error;
+              setLive((p) => {
+                const tools = p.tools.map((t) =>
+                  t.name === tname && t.durationMs === undefined
+                    ? { ...t, durationMs: (payload.duration ?? 0) * 1000, error: isErr }
+                    : t
+                );
+                const next = { ...p, tools, failedCount: p.failedCount + (isErr ? 1 : 0) };
+                liveBySessionRef.current[sessionId] = { live: next, streamedText: liveBySessionRef.current[sessionId]?.streamedText ?? "" };
+                return next;
+              });
+            } else if (payload.event === "assistant.completed") {
+              const content = payload.content ?? "";
+              if (content) {
+                setStreamedText(content);
+                liveBySessionRef.current[sessionId] = { live: { ...liveBySessionRef.current[sessionId]?.live ?? ({} as LiveState), phase: "streaming" }, streamedText: content };
+                setMessages((m) => {
+                  const copy = [...m];
+                  const last = copy[copy.length - 1];
+                  if (last?.role === "assistant") {
+                    copy[copy.length - 1] = { ...last, content };
+                  } else {
+                    copy.push({ role: "assistant", content });
+                  }
+                  return copy;
+                });
+              }
+            } else if (payload.event === "run.completed") {
+              livePhase = false;
+              const completedAt = Date.now();
+              setLive((p) => {
+                const next: LiveState = {
+                  ...p,
+                  phase: "done",
+                  stats: {
+                    toolCount: p.toolCount,
+                    failedTools: p.failedCount,
+                    startedAt: p.stats?.startedAt ?? completedAt,
+                    completedAt,
+                    durationMs: completedAt - (p.stats?.startedAt ?? completedAt),
+                    usage: payload.usage ?? null,
+                    runtime: payload.runtime ?? null,
+                  },
+                };
+                liveBySessionRef.current[sessionId] = { live: next, streamedText: liveBySessionRef.current[sessionId]?.streamedText ?? "" };
+                return next;
+              });
+              setLastStats((prev) => ({ ...(prev ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), ...(payload.usage ? { usage: payload.usage, runtime: payload.runtime } : {}) }));
+              setBusy(false);
+              streamSessionRef.current = null;
+            } else if (payload.event === "done" || payload.event === "error") {
+              if (payload.event === "error") {
+                setError(payload.error ?? payload.message ?? "Stream error");
+              }
+              setBusy(false);
+              streamSessionRef.current = null;
+              livePhase = false;
+            }
+          }
+        }
+        // Stream closed without a terminal event but the run was live —
+        // reconcile from the server so nothing is lost.
+        if (livePhase) {
+          setBusy(false);
+          streamSessionRef.current = null;
+          await loadMessages(sessionId);
+        }
+      } catch {
+        // Aborted (new send started) or transient — the 15s session poll
+        // will re-trigger reattach if the run is still live.
+        setBusy(false);
+        streamSessionRef.current = null;
+      }
+    },
+    [loadMessages]
+  );
+
+  // Reattach when: the page becomes visible again (tab switch / app return),
+  // the active conversation changes to one with a live run, or a session
+  // appears active in the poll while this client isn't attached.
+  const visibilityHandler = useCallback(() => {
+    if (document.visibilityState === "visible" && activeId) {
+      const sess = sessions.find((s) => s.id === activeId);
+      if (sess?.is_active && streamSessionRef.current !== activeId) {
+        void reattachRun(activeId);
+      }
+    }
+  }, [activeId, sessions, reattachRun]);
+
+  useEffect(() => {
+    document.addEventListener("visibilitychange", visibilityHandler);
+    window.addEventListener("focus", visibilityHandler);
+    return () => {
+      document.removeEventListener("visibilitychange", visibilityHandler);
+      window.removeEventListener("focus", visibilityHandler);
+    };
+  }, [visibilityHandler]);
+
+  // On mount and whenever the active session changes, reattach if it's live.
+  useEffect(() => {
+    if (activeId) {
+      const sess = sessions.find((s) => s.id === activeId);
+      if (sess?.is_active && !busyRef.current) {
+        void reattachRun(activeId);
+      }
+    }
+  }, [activeId, sessions, reattachRun]);
+
   const toggleMic = useCallback(() => {
     if (listening) {
       recognitionRef.current?.stop();

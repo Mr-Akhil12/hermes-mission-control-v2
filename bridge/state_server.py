@@ -484,7 +484,12 @@ class Handler(BaseHTTPRequestHandler):
             # Session sub-endpoints (messages, chat) come from the Hermes API
             # so the chat page gets real persisted conversation history.
             # Exact /api/sessions stays local (existing Sessions page shape).
+            # The /events endpoint is a long-lived SSE reattach stream — must
+            # be chunked, not buffered, or the client never sees live frames.
             if path.startswith("/api/sessions/") and path != "/api/sessions":
+                if path.endswith("/events"):
+                    self._proxy_api_get_stream(path)
+                    return
                 self._proxy_api_get(path)
                 return
             if path == "/api/crons":
@@ -546,6 +551,37 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._json({"error": str(e)}, 500)
 
+    def _proxy_api_get_stream(self, path: str) -> None:
+        """Forward a GET to the Hermes API (:8642) with chunked SSE streaming
+        (used by /api/sessions/{id}/events reattach)."""
+        import urllib.request as u
+        api = os.environ.get("HERMES_API_URL", "http://127.0.0.1:8642")
+        api_key = os.environ.get("API_SERVER_KEY", "")
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        req = u.Request(f"{api}{self.path}", headers=headers)
+        try:
+            with u.urlopen(req, timeout=30) as resp:
+                self.send_response(resp.status)
+                ctype = resp.headers.get("Content-Type", "text/event-stream")
+                self.send_header("Content-Type", ctype)
+                self.send_header("Cache-Control", "no-cache, no-transform")
+                self.send_header("X-Accel-Buffering", "no")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                while True:
+                    chunk = resp.read(4096)
+                    if not chunk:
+                        break
+                    try:
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        break
+        except Exception as e:
+            self._json({"error": str(e)}, 502)
+
     def _proxy_api_get(self, path: str) -> None:
         """Forward a GET to the Hermes API (:8642) — session list/messages."""
         import urllib.request as u
@@ -567,6 +603,79 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
         except Exception as e:
             self._json({"error": str(e)}, 502)
+
+    def _session_control(self, action: str, session_id: str, arg: str = "") -> dict:
+        """Call a session-scoped control endpoint on the Hermes API (:8642).
+
+        These hit the API server's /api/sessions/{id}/steer|stop|goal routes,
+        which operate on the ACTUAL conversation's live agent — never the
+        ws_bridge's throwaway tui_gateway session.
+        """
+        import urllib.request as u
+        import json as _json
+        api = os.environ.get("HERMES_API_URL", "http://127.0.0.1:8642")
+        api_key = os.environ.get("API_SERVER_KEY", "")
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        if action == "steer":
+            body = _json.dumps({"text": arg}).encode()
+        elif action == "stop":
+            body = b"{}"
+        elif action == "goal":
+            body = _json.dumps({"arg": arg}).encode()
+        else:
+            return {"ok": False, "error": f"unknown action {action}"}
+        req = u.Request(
+            f"{api}/api/sessions/{session_id}/{action}",
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with u.urlopen(req, timeout=20) as resp:
+                data = _json.loads(resp.read() or b"{}")
+            return data
+        except u.HTTPError as e:
+            try:
+                err_data = _json.loads(e.read() or b"{}")
+            except Exception:
+                err_data = {}
+            return {"ok": False, "error": str(e), **err_data}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _session_steer(self, session_id: str, text: str) -> str:
+        result = self._session_control("steer", session_id, text)
+        status = result.get("status")
+        if status == "queued":
+            return f"⏩ Steer queued — arrives after the next tool call: {text[:80]}{'...' if len(text) > 80 else ''}"
+        if status == "rejected":
+            return "Steer rejected (empty payload)."
+        if status == "no_active_run":
+            return "No live agent for this conversation right now — send it as a normal message instead."
+        if result.get("error"):
+            return f"⚠️ Steer failed: {result['error']}"
+        return "Steer accepted."
+
+    def _session_stop(self, session_id: str) -> str:
+        result = self._session_control("stop", session_id)
+        if result.get("status") == "interrupted":
+            return "⏹ Stopped the current run."
+        if result.get("status") == "no_active_run":
+            return "No active run to stop."
+        if result.get("error"):
+            return f"⚠️ Stop failed: {result['error']}"
+        return "Stop requested."
+
+    def _session_goal(self, session_id: str, arg: str) -> str:
+        result = self._session_control("goal", session_id, arg)
+        out = result.get("output")
+        if out:
+            return out
+        if result.get("error"):
+            return f"⚠️ Goal failed: {result['error']}"
+        return "Goal updated."
 
     def _proxy_native(self, path: str) -> None:
         """Proxy a request to the native Hermes dashboard (:9119)."""
@@ -698,10 +807,23 @@ class Handler(BaseHTTPRequestHandler):
         raw = payload.get("command") or ""
         name = payload.get("name") or raw.lstrip("/").split(" ", 1)[0]
         arg = payload.get("arg") or (raw.lstrip("/").split(" ", 1)[1] if " " in raw.lstrip("/") else "")
-        # NOTE: the client's session_id is an API-server session, which does
-        # NOT exist in the tui_gateway registry — slash.exec would reject it.
-        # The bridge keeps its own persistent tui_gateway session; use that.
-        session_id = ""
+        # Session-scoped commands target the ACTUAL conversation's live agent
+        # on the Hermes API server (:8642) — NOT the ws_bridge's throwaway
+        # tui_gateway session. The old bridge routing silently dropped steers
+        # (2026-08-16 orphan-session incident): /steer on a session with no
+        # live agent fell back to a queue nobody drained, and the text was
+        # never persisted. These endpoints call agent.steer()/interrupt()/goal
+        # directly on the agent serving this session.
+        session_id = payload.get("session_id") or ""
+        if name == "steer" and session_id:
+            self._json({"ok": True, "name": "steer", "output": self._session_steer(session_id, arg)})
+            return
+        if name in ("stop", "interrupt") and session_id:
+            self._json({"ok": True, "name": name, "output": self._session_stop(session_id)})
+            return
+        if name == "goal" and session_id:
+            self._json({"ok": True, "name": "goal", "output": self._session_goal(session_id, arg)})
+            return
 
         # Destructive / gateway-lifecycle commands are refused from the
         # dashboard — they need a real terminal (Hermes blocks them from
