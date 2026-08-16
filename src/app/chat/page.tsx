@@ -475,17 +475,28 @@ export default function ChatPage() {
             ].join("\n");
             setMessages((m) => [...m, { role: "system", content: out }]);
           } else {
-            const inp = lastStats?.usage?.input_tokens ?? 0;
-            const out = lastStats?.usage?.output_tokens ?? 0;
-            const tot = lastStats?.usage?.total_tokens ?? 0;
+            // REAL cumulative session usage from the sessions table (maintained
+            // by Hermes on every API call) — the actual context that has been
+            // sent to the model across the session's life, not the last run.
+            const sess = sessions.find((s) => s.id === sid);
+            const inp = sess?.input_tokens ?? lastStats?.usage?.input_tokens ?? 0;
+            const out = sess?.output_tokens ?? lastStats?.usage?.output_tokens ?? 0;
+            const tot = inp + out;
+            const calls = sess?.api_call_count ?? 0;
+            const cacheRead = sess?.cache_read_tokens ?? 0;
+            const cacheWrite = sess?.cache_write_tokens ?? 0;
+            const reasoning = sess?.reasoning_tokens ?? 0;
             const out2 = [
               "**Context**",
               "",
               `Messages in session: ${sess?.message_count ?? messages.length}`,
-              `Last run input tokens: ${inp.toLocaleString()}`,
-              `Last run output tokens: ${out.toLocaleString()}`,
-              `Last run total: ${tot.toLocaleString()}`,
-              "Full per-run token data comes from the run stats footer on each reply.",
+              `API calls: ${calls.toLocaleString()}`,
+              `Input tokens (cumulative): ${inp.toLocaleString()}`,
+              `Output tokens (cumulative): ${out.toLocaleString()}`,
+              `Total (cumulative): ${tot.toLocaleString()}`,
+              `Cache read: ${cacheRead.toLocaleString()} · write: ${cacheWrite.toLocaleString()}`,
+              `Reasoning tokens: ${reasoning.toLocaleString()}`,
+              "These are REAL cumulative session numbers — they add up over time and persist across runs.",
             ].join("\n");
             setMessages((m) => [...m, { role: "system", content: out2 }]);
           }
@@ -1985,7 +1996,7 @@ export default function ChatPage() {
                   {messages.map((m, i) => (
                     <MessageBubble key={`${m.role}-${i}`} msg={m} settings={settings} />
                   ))}
-                  {busy && <PhaseBanner phase={live.phase} toolCount={live.toolCount} elapsedSec={elapsedSec} />}
+                  {busy && <PhaseBanner phase={live.phase} toolCount={live.toolCount} elapsedSec={elapsedSec} sessionUsage={sessions.find((s) => s.id === activeId) ?? null} />}
                   {busy && renderLiveContent()}
                 </>
               )}
@@ -2011,12 +2022,17 @@ export default function ChatPage() {
 
             {/* Permanent run stats — model, tools, context usage. Always visible
                 above the composer so it's constantly monitorable. Shows the last
-                run's stats when idle, live stats while a run is in progress. */}
+                run's stats when idle, live stats while a run is in progress.
+                Context % + input/output/total come from the session's REAL
+                cumulative usage (sessions table, maintained by Hermes on every
+                API call) so they persist and add up over time — not the last
+                run's usage. */}
             <div className="border-t px-3 py-1.5" style={{ borderColor: "var(--card-border)" }}>
               <RunStatsFooter
                 stats={live.phase !== "idle" && live.stats ? live.stats : lastStats}
                 phase={live.phase !== "idle" ? live.phase : "done"}
                 contextWindow={contextWindowFor((live.phase !== "idle" && live.stats?.runtime?.model) || lastStats?.runtime?.model || MODEL)}
+                sessionUsage={sessions.find((s) => s.id === activeId) ?? null}
               />
             </div>
 

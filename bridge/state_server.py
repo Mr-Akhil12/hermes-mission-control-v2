@@ -112,14 +112,16 @@ def load_sessions(limit: int = 25, source: str | None = None) -> list[dict]:
         # never cron/subagent/dispatch noise — otherwise the top-N is flooded
         # by cron runs and real chats vanish from the list.
         rows = con.execute(
-            "SELECT id, source, title, started_at, ended_at, end_reason, message_count, tool_call_count "
+            "SELECT id, source, title, started_at, ended_at, end_reason, message_count, tool_call_count, "
+            "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, api_call_count "
             "FROM sessions WHERE source = 'dashboard' OR source = '' OR source IS NULL "
             "ORDER BY started_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
     else:
         rows = con.execute(
-            "SELECT id, source, title, started_at, ended_at, end_reason, message_count, tool_call_count "
+            "SELECT id, source, title, started_at, ended_at, end_reason, message_count, tool_call_count, "
+            "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, api_call_count "
             "FROM sessions ORDER BY started_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
@@ -158,6 +160,17 @@ def load_sessions(limit: int = 25, source: str | None = None) -> list[dict]:
                 "end_reason": r[5],
                 "message_count": r[6],
                 "tool_call_count": r[7],
+                # REAL cumulative usage for the whole session (not per-run):
+                # these columns are maintained by Hermes on every API call, so
+                # input/output/total reflect the actual context that has been
+                # sent to the model across the session's life — the number the
+                # footer pie should show, not the last run's usage.
+                "input_tokens": r[8] or 0,
+                "output_tokens": r[9] or 0,
+                "cache_read_tokens": r[10] or 0,
+                "cache_write_tokens": r[11] or 0,
+                "reasoning_tokens": r[12] or 0,
+                "api_call_count": r[13] or 0,
                 "last_message": last,
                 "is_active": is_active,
             }

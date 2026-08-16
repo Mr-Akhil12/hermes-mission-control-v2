@@ -9,7 +9,7 @@ import type { ToolEvent, RunStats } from "@/lib/chat-types";
 
 export type RunPhase = "idle" | "initializing" | "thinking" | "tools" | "streaming" | "done" | "error";
 
-export function PhaseBanner({ phase, toolCount, elapsedSec }: { phase: RunPhase; toolCount: number; elapsedSec?: number }) {
+export function PhaseBanner({ phase, toolCount, elapsedSec, sessionUsage }: { phase: RunPhase; toolCount: number; elapsedSec?: number; sessionUsage?: { input_tokens?: number } | null }) {
   if (phase === "idle") return null;
 
   const rows: { phase: RunPhase; label: string; icon: React.ReactNode; done: boolean }[] = [
@@ -22,6 +22,12 @@ export function PhaseBanner({ phase, toolCount, elapsedSec }: { phase: RunPhase;
   const phaseOrder = ["initializing", "thinking", "tools", "streaming"] as const;
   const idx = phaseOrder.indexOf(phase as (typeof phaseOrder)[number]);
   const fmt = elapsedSec != null ? `${Math.floor(elapsedSec / 60)}:${String(elapsedSec % 60).padStart(2, "0")}` : "";
+  // While "thinking" with a big real context, the model is ingesting the
+  // session's cumulative input before it can emit its first reasoning token.
+  // Show that so a 30s pre-stream wait reads as "processing context", not a
+  // dead spinner.
+  const ctxIn = sessionUsage?.input_tokens ?? 0;
+  const processingCtx = phase === "thinking" && ctxIn > 0;
 
   return (
     <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border px-3 py-2 text-xs" style={{ borderColor: "var(--card-border)", background: "color-mix(in srgb, var(--bg) 55%, transparent)" }}>
@@ -35,6 +41,12 @@ export function PhaseBanner({ phase, toolCount, elapsedSec }: { phase: RunPhase;
           </span>
         );
       })}
+      {processingCtx && (
+        <span className="flex items-center gap-1.5" style={{ color: "var(--text-faint)" }}>
+          <Loader2 className="h-3 w-3 animate-spin" />
+          processing {ctxIn.toLocaleString()} tokens of context…
+        </span>
+      )}
       {fmt && (
         <span className="ml-auto flex items-center gap-1.5 font-mono text-[10px]" style={{ color: "var(--text-faint)" }}>
           <span className="h-1.5 w-1.5 animate-pulse rounded-full" style={{ background: "var(--accent)" }} />
@@ -60,26 +72,42 @@ export function RunStatsFooter({
   stats,
   phase,
   contextWindow,
+  sessionUsage,
 }: {
   stats: RunStats | null;
   phase: RunPhase;
   contextWindow?: number;
+  // REAL cumulative usage for the whole session (from the sessions table,
+  // maintained by Hermes on every API call). This is the persistent context
+  // that adds up over time — NOT the last run's usage.
+  sessionUsage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number } | null;
 }) {
   const live =
     stats && phase !== "done" && phase !== "error" && phase !== "idle";
 
-  // Context % — used tokens / model max, rendered as a small pie + "41% / 512k".
+  // Context % — REAL cumulative session input + live in-flight output estimate
+  // over the model's max window. The provider only reports exact usage when a
+  // call completes, so the only estimate left is the current in-flight output.
   const maxTokens = contextWindow && contextWindow > 0 ? contextWindow : 0;
-  const usedTokens = stats?.usage?.total_tokens ?? 0;
+  const sessIn = sessionUsage?.input_tokens ?? 0;
+  const sessOut = sessionUsage?.output_tokens ?? 0;
+  const liveOut = live ? (stats?.usage?.output_tokens ?? 0) : 0;
+  const usedTokens = sessIn + liveOut;
   const pct = maxTokens > 0 ? Math.min(100, Math.round((usedTokens / maxTokens) * 100)) : 0;
   const ctxLabel = maxTokens > 0
     ? `${usedTokens.toLocaleString()} / ${maxTokens >= 1_000_000 ? `${(maxTokens / 1_000_000).toFixed(0)}M` : `${(maxTokens / 1000).toFixed(0)}k`}`
     : "—";
+  // Compaction warning — Hermes compresses at 90% of the context window
+  // (config compression.threshold: 0.9). Warn as we approach it.
+  const COMPACT_AT = 90;
+  const WARN_AT = 75;
+  const compacting = pct >= COMPACT_AT;
+  const approaching = pct >= WARN_AT && pct < COMPACT_AT;
   // Pie: conic-gradient ring showing the % filled.
   const pieStyle =
     maxTokens > 0
       ? {
-          background: `conic-gradient(var(--accent) ${pct * 3.6}deg, rgba(124,108,255,0.15) ${pct * 3.6}deg 360deg)`,
+          background: `conic-gradient(${compacting ? "var(--red)" : approaching ? "var(--amber, #f5a623)" : "var(--accent)"} ${pct * 3.6}deg, rgba(124,108,255,0.15) ${pct * 3.6}deg 360deg)`,
         }
       : { background: "rgba(124,108,255,0.15)" };
 
@@ -103,23 +131,33 @@ export function RunStatsFooter({
           "—"
         )}
       </span>
-      <span className="flex items-center gap-1.5" title={`Context used: ${pct}% of ${maxTokens.toLocaleString()} tokens`}>
+      <span className="flex items-center gap-1.5" title={`Session context used: ${pct}% of ${maxTokens.toLocaleString()} tokens (real cumulative input + live output)`}>
         <span
           className="inline-block h-3 w-3 rounded-full"
           style={pieStyle}
         />
-        <span style={{ color: pct > 85 ? "var(--red)" : pct > 60 ? "var(--amber, #f5a623)" : undefined }}>
+        <span style={{ color: compacting ? "var(--red)" : approaching ? "var(--amber, #f5a623)" : undefined }}>
           {pct}% / {ctxLabel}
         </span>
       </span>
-      <span className="flex items-center gap-1" title="Input tokens (context)">
-        ⬇ {fmtTokens(stats?.usage?.input_tokens)}
+      {compacting && (
+        <span className="flex items-center gap-1 rounded px-1.5 py-0.5" style={{ background: "color-mix(in srgb, var(--red) 15%, transparent)", color: "var(--red)" }}>
+          ⚠ compaction imminent
+        </span>
+      )}
+      {approaching && (
+        <span className="flex items-center gap-1 rounded px-1.5 py-0.5" style={{ background: "color-mix(in srgb, var(--amber, #f5a623) 15%, transparent)", color: "var(--amber, #f5a623)" }}>
+          approaching compaction
+        </span>
+      )}
+      <span className="flex items-center gap-1" title="Input tokens — real cumulative session context sent to the model">
+        ⬇ {fmtTokens(sessIn + (live ? 0 : 0))}
       </span>
-      <span className="flex items-center gap-1" title="Output tokens">
-        ⬆ {fmtTokens(stats?.usage?.output_tokens)}
+      <span className="flex items-center gap-1" title="Output tokens — real cumulative session output (+ live in-flight estimate while running)">
+        ⬆ {fmtTokens(sessOut + liveOut)}
       </span>
-      <span className="flex items-center gap-1" title="Total tokens">
-        Σ {fmtTokens(stats?.usage?.total_tokens)}
+      <span className="flex items-center gap-1" title="Total tokens — real cumulative session total">
+        Σ {fmtTokens(sessIn + sessOut + liveOut)}
       </span>
       <span className="ml-auto">
         {live ? "running…" : `${fmtDuration(stats?.durationMs)} total`}

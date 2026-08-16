@@ -107,6 +107,15 @@ export type SessionMeta = {
   started_at?: string | number;
   ended_at?: string | number | null;
   is_active?: boolean;
+  // REAL cumulative usage for the whole session (maintained by Hermes on
+  // every API call) — the actual context that has been sent to the model,
+  // not the last run's usage.
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  reasoning_tokens?: number;
+  api_call_count?: number;
 };
 
 // Display settings persisted to localStorage.
