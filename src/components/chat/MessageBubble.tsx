@@ -4,9 +4,10 @@
 // rendering. Reasoning display respects the user's setting.
 
 import { memo, useState } from "react";
-import { Brain, ChevronDown, ChevronRight } from "lucide-react";
-import type { ChatSettings, ChatMsg, ToolEvent } from "@/lib/chat-types";
+import { Brain, ChevronDown, ChevronRight, Wrench, CheckCircle2, XCircle, Loader2, TerminalSquare, FileText, Globe, Search, Maximize2 } from "lucide-react";
+import type { ChatSettings, ChatMsg, ToolEvent, ToolCallInfo } from "@/lib/chat-types";
 import { ToolCallStack } from "./ToolCalls";
+import { ChainView } from "./ChainView";
 
 /** Tiny markdown renderer: **bold**, `code`, ```fences```, *italic*, links. */
 export const MarkdownLite = memo(function MarkdownLite({ text }: { text: string }) {
@@ -124,6 +125,7 @@ export const MessageBubble = memo(function MessageBubble({
 }) {
   const isUser = msg.role === "user";
   const isSys = msg.role === "system";
+  const [chainOpen, setChainOpen] = useState(false);
 
   if (isSys) {
     return (
@@ -138,6 +140,10 @@ export const MessageBubble = memo(function MessageBubble({
     );
   }
 
+  // History bubbles carry reconstructed toolCalls (from the persisted store);
+  // live bubbles carry ToolEvent[] via `tools`. Show whichever exists.
+  const hasChain = !isUser && (msg.toolCalls?.length || (tools && tools.length > 0));
+
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
@@ -151,6 +157,11 @@ export const MessageBubble = memo(function MessageBubble({
         {!isUser && msg.reasoning && (
           <ReasoningBlock text={msg.reasoning} mode={settings.reasoning} />
         )}
+        {!isUser && msg.toolCalls && msg.toolCalls.length > 0 && (
+          <div className="mb-2">
+            <HistoryToolCalls calls={msg.toolCalls} mode={settings.tools} />
+          </div>
+        )}
         {!isUser && tools && tools.length > 0 && (
           <div className="mb-2">
             <ToolCallStack tools={tools} mode={settings.tools} />
@@ -159,7 +170,70 @@ export const MessageBubble = memo(function MessageBubble({
         <div className="whitespace-pre-wrap break-words">
           <MarkdownLite text={msg.content} />
         </div>
+        {hasChain && (
+          <button
+            onClick={() => setChainOpen(true)}
+            className="mt-2 flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[10px] font-semibold"
+            style={{ borderColor: "var(--card-border)", color: "var(--text-faint)" }}
+          >
+            <Maximize2 className="h-3 w-3" />
+            Full chain — {msg.toolCalls?.length ?? tools?.length ?? 0} tool call{((msg.toolCalls?.length ?? tools?.length ?? 0) === 1) ? "" : "s"}
+          </button>
+        )}
       </div>
+      {chainOpen && (
+        <ChainView
+          reasoning={msg.reasoning ?? ""}
+          toolCalls={msg.toolCalls ?? []}
+          liveTools={tools ?? []}
+          content={msg.content}
+          onClose={() => setChainOpen(false)}
+        />
+      )}
     </div>
   );
 });
+
+// Compact chips for tool calls reconstructed from history.
+function HistoryToolCalls({ calls, mode }: { calls: ToolCallInfo[]; mode: ChatSettings["tools"] }) {
+  if (mode === "count") {
+    return (
+      <div className="flex items-center gap-1.5 text-xs" style={{ color: "var(--text-faint)" }}>
+        <Wrench className="h-3.5 w-3.5" />
+        {calls.length} tool call{calls.length === 1 ? "" : "s"}
+        {calls.filter((c) => c.error).length > 0 && (
+          <span style={{ color: "var(--red)" }}>· {calls.filter((c) => c.error).length} failed</span>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div className="flex max-w-full flex-col gap-1">
+      {calls.map((c, i) => (
+        <div
+          key={`${c.name}-${i}`}
+          className="flex max-w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs"
+          style={{
+            borderColor: c.error ? "color-mix(in srgb, var(--red) 40%, transparent)" : "var(--card-border)",
+            background: c.error ? "rgba(255,92,92,0.08)" : "color-mix(in srgb, var(--bg) 55%, transparent)",
+            color: c.error ? "var(--red)" : "var(--text-dim)",
+          }}
+        >
+          {c.error ? (
+            <XCircle className="h-3.5 w-3.5 shrink-0" />
+          ) : c.result !== undefined ? (
+            <CheckCircle2 className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--green)" }} />
+          ) : (
+            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" style={{ color: "var(--accent)" }} />
+          )}
+          <span className="truncate">{c.name.replace(/_/g, " ")}</span>
+          {c.result !== undefined && (
+            <span className="ml-auto shrink-0 font-mono text-[10px] opacity-70">
+              {c.result.length > 0 ? `${c.result.length} chars` : "empty"}
+            </span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}

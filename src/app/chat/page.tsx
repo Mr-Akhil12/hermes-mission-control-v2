@@ -5,7 +5,7 @@ import {
   Send, Mic, MicOff, Volume2, MessageSquare, Plus, ChevronLeft, ChevronRight,
   Loader2, Trash2, Pencil, Square, CheckSquare, X, Maximize2, Minimize2,
 } from "lucide-react";
-import type { ChatMsg, ChatSettings, SessionMeta, StreamEvent, ToolEvent, RunStats } from "@/lib/chat-types";
+import type { ChatMsg, ChatSettings, SessionMeta, StreamEvent, ToolEvent, RunStats, ToolCallInfo } from "@/lib/chat-types";
 import { MessageBubble, MarkdownLite } from "@/components/chat/MessageBubble";
 import { ChatSettingsButton, DEFAULT_SETTINGS, loadSettings } from "@/components/chat/ChatSettings";
 import { Composer } from "@/components/chat/Composer";
@@ -13,6 +13,7 @@ import { SlashAutocomplete } from "@/components/chat/SlashAutocomplete";
 import { PhaseBanner, RunStatsFooter, type RunPhase } from "@/components/chat/RunStatus";
 import { MessageSkeleton, SessionListSkeleton } from "@/components/chat/Skeleton";
 import { BrowserView } from "@/components/chat/BrowserView";
+import { ChainView } from "@/components/chat/ChainView";
 
 const MODEL = "deepseek-v4-flash:0731";
 
@@ -55,6 +56,7 @@ export default function ChatPage() {
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
+  const [chainOpen, setChainOpen] = useState(false);
   const [live, setLive] = useState<LiveState>(IDLE_LIVE);
   const [lastStats, setLastStats] = useState<RunStats | null>(null);
   const [settings, setSettings] = useState<ChatSettings>(DEFAULT_SETTINGS);
@@ -124,18 +126,67 @@ export default function ChatPage() {
       // current one: one message per turn.
       const msgs: ChatMsg[] = [];
       let pending: ChatMsg | null = null;
+      // Tool results keyed by tool_call_id so we can attach them to the
+      // assistant's tool_calls and rebuild the full chain.
+      const toolResults = new Map<string, { result: string; error: boolean }>();
       for (const m of list) {
+        if (m.role === "tool") {
+          const callId = m.tool_call_id;
+          if (callId) {
+            let result = typeof m.content === "string" ? m.content : "";
+            let error = false;
+            try {
+              const parsed = JSON.parse(result);
+              if (parsed && typeof parsed === "object") {
+                if (parsed.error) error = true;
+                if (parsed.output !== undefined) result = typeof parsed.output === "string" ? parsed.output : JSON.stringify(parsed.output);
+                else if (parsed.result !== undefined) result = typeof parsed.result === "string" ? parsed.result : JSON.stringify(parsed.result);
+              }
+            } catch {
+              /* keep raw content */
+            }
+            toolResults.set(callId, { result: result.slice(0, 2000), error });
+          }
+          continue;
+        }
         if (!["user", "assistant", "system"].includes(m.role)) continue;
+        // Parse the assistant's tool_calls (stored as a JSON string).
+        let toolCalls: ToolCallInfo[] | undefined;
+        if (m.role === "assistant" && m.tool_calls && m.tool_calls !== "None") {
+          try {
+            const raw = typeof m.tool_calls === "string" ? JSON.parse(m.tool_calls) : m.tool_calls;
+            if (Array.isArray(raw)) {
+              toolCalls = raw.map((tc: any) => {
+                const fn = tc?.function ?? {};
+                const callId = tc?.id ?? tc?.call_id ?? "";
+                const res = callId ? toolResults.get(callId) : undefined;
+                return {
+                  id: callId,
+                  name: fn?.name ?? m.tool_name ?? "tool",
+                  args: typeof fn?.arguments === "string" ? fn.arguments : JSON.stringify(fn?.arguments ?? {}),
+                  result: res?.result,
+                  error: res?.error,
+                };
+              });
+            }
+          } catch {
+            toolCalls = undefined;
+          }
+        }
         const msg: ChatMsg = {
           role: m.role,
           content: m.content ?? "",
           reasoning: m.reasoning_content ?? m.reasoning ?? null,
+          toolCalls,
         };
         if (msg.role === "assistant") {
           if (pending) {
             pending.content += (pending.content && msg.content ? "\n\n" : "") + msg.content;
             if (msg.reasoning) {
               pending.reasoning = pending.reasoning ? `${pending.reasoning}\n${msg.reasoning}` : msg.reasoning;
+            }
+            if (msg.toolCalls?.length) {
+              pending.toolCalls = [...(pending.toolCalls ?? []), ...msg.toolCalls];
             }
           } else {
             pending = { ...msg };
@@ -1242,7 +1293,7 @@ export default function ChatPage() {
           )}
           {live.tools.length > 0 && settings.tools !== "count" && (
             <div className="mb-2 space-y-1">
-              {live.tools.map((t, i) => (
+              {live.tools.slice(-3).map((t, i) => (
                 <div key={`${t.name}-${i}`} className="flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs" style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}>
                   {t.durationMs !== undefined ? (
                     t.error ? <span style={{ color: "var(--red)" }}>✕</span> : <span style={{ color: "var(--green)" }}>✓</span>
@@ -1255,6 +1306,16 @@ export default function ChatPage() {
                   )}
                 </div>
               ))}
+              {live.tools.length > 3 && (
+                <button
+                  onClick={() => setChainOpen(true)}
+                  className="flex w-full items-center justify-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[10px] font-semibold"
+                  style={{ borderColor: "var(--card-border)", color: "var(--text-faint)" }}
+                >
+                  <Maximize2 className="h-3 w-3" />
+                  View all {live.tools.length} tool calls
+                </button>
+              )}
             </div>
           )}
           {live.phase === "streaming" && streamedText && (
@@ -1567,6 +1628,16 @@ export default function ChatPage() {
               )}
               <div ref={bottomRef} />
             </div>
+
+            {chainOpen && (
+              <ChainView
+                reasoning={live.reasoning}
+                toolCalls={[]}
+                liveTools={live.tools}
+                content={streamedText}
+                onClose={() => setChainOpen(false)}
+              />
+            )}
 
             {error && (
               <div className="border-t px-4 py-2 text-xs" style={{ borderColor: "var(--card-border)", color: "var(--red)" }}>

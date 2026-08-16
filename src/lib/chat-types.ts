@@ -5,6 +5,20 @@ export type ChatMsg = {
   role: "user" | "assistant" | "system";
   content: string;
   reasoning?: string | null;
+  // Tool calls made by the assistant before producing this content —
+  // reconstructed from the persisted message store so history shows the
+  // full chain (reasoning → tool → reasoning → tool → answer), not just
+  // the final text.
+  toolCalls?: ToolCallInfo[];
+};
+
+export type ToolCallInfo = {
+  id?: string;
+  name: string;
+  args?: string;
+  result?: string;
+  error?: boolean;
+  durationMs?: number;
 };
 
 export type ToolEvent = {
