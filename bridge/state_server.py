@@ -163,6 +163,26 @@ def load_sessions(limit: int = 25, source: str | None = None) -> list[dict]:
             }
         )
     con.close()
+    # Merge the Hermes API's authoritative live-session list (agents with an
+    # in-flight run RIGHT NOW) so the sidebar Working… indicator reflects the
+    # real live run — the 60s message heuristic above goes stale during long
+    # reasoning/tool-call stretches where no new message rows land.
+    try:
+        import urllib.request as _u
+        api = os.environ.get("HERMES_API_URL", "http://127.0.0.1:8642")
+        api_key = os.environ.get("API_SERVER_KEY", "")
+        _h = {}
+        if api_key:
+            _h["Authorization"] = f"Bearer {api_key}"
+        _req = _u.Request(f"{api}/api/live/sessions", headers=_h)
+        with _u.urlopen(_req, timeout=2) as _resp:
+            _live = json.loads(_resp.read() or b"{}").get("session_ids") or []
+        _by_id = {s["id"]: s for s in sessions}
+        for _sid in _live:
+            if _sid in _by_id:
+                _by_id[_sid]["is_active"] = True
+    except Exception:
+        pass
     return sessions
 
 

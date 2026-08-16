@@ -6,10 +6,10 @@
 
 import { useState } from "react";
 import {
-  X, Brain, Wrench, CheckCircle2, XCircle, Loader2,
-  TerminalSquare, FileText, Globe, Search, ChevronDown, ChevronRight,
+  Brain, ChevronDown, ChevronRight, X, Loader2, Wrench, CheckCircle2,
+  XCircle, TerminalSquare, FileText, Globe, Search,
 } from "lucide-react";
-import type { ToolCallInfo, ToolEvent } from "@/lib/chat-types";
+import type { ChainSegment, ToolCallInfo, ToolEvent } from "@/lib/chat-types";
 
 function toolIcon(name: string) {
   const n = name.toLowerCase();
@@ -48,22 +48,29 @@ export function ChainView({
   reasoning,
   toolCalls,
   liveTools,
+  chain,
   content,
   onClose,
 }: {
   reasoning: string;
   toolCalls: ToolCallInfo[];
   liveTools: ToolEvent[];
+  chain?: ChainSegment[];
   content: string;
   onClose: () => void;
 }) {
-  // Merge history toolCalls (with results) and live ToolEvents (in progress)
-  // into one ordered list. Live events carry startedAt; history calls are
-  // already in order.
+  // History toolCalls (with results) and live ToolEvents (in progress) merged
+  // into one ordered list. When an ordered `chain` prop is provided (live
+  // view), it wins — reasoning and tools are already interleaved in the exact
+  // sequence they happened.
   const merged: { name: string; args?: string; result?: string; error?: boolean; live?: boolean }[] = [
     ...toolCalls.map((c) => ({ name: c.name, args: c.args, result: c.result, error: c.error })),
     ...liveTools.map((t) => ({ name: t.name, live: true, error: t.error })),
   ];
+
+  // Ordered segments for the live chain: reasoning blocks and tool chips
+  // interleaved exactly as they happened (reasoning → tool → reasoning → tool).
+  const liveSegments = chain ?? [];
 
   return (
     <div
@@ -95,56 +102,102 @@ export function ChainView({
         </div>
 
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
-          {/* Reasoning blocks and tool calls interleaved in order */}
-          {reasoning && (
-            <div className="rounded-lg border-l-2 px-3 py-2" style={{ borderLeftColor: "var(--accent)", background: "rgba(124,108,255,0.06)" }}>
-              <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold" style={{ color: "var(--text-faint)" }}>
-                <Brain className="h-3 w-3" style={{ color: "var(--accent)" }} />
-                Reasoning
-              </div>
-              <div className="whitespace-pre-wrap text-xs leading-relaxed" style={{ color: "var(--text-dim)" }}>
-                {reasoning}
-              </div>
-            </div>
-          )}
+          {/* Ordered chain (live): reasoning and tools interleaved as they
+              happened — the user's core ask: reasoning ALWAYS shows, tools
+              ALWAYS show, in sequence, never split into disappearing sections. */}
+          {liveSegments.length > 0 ? (
+            liveSegments.map((seg, i) =>
+              seg.kind === "reasoning" ? (
+                <div key={`r-${i}`} className="rounded-lg border-l-2 px-3 py-2" style={{ borderLeftColor: "var(--accent)", background: "rgba(124,108,255,0.06)" }}>
+                  <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold" style={{ color: "var(--text-faint)" }}>
+                    <Brain className="h-3 w-3" style={{ color: "var(--accent)" }} />
+                    Reasoning
+                  </div>
+                  <div className="whitespace-pre-wrap text-xs leading-relaxed" style={{ color: "var(--text-dim)" }}>
+                    {seg.text}
+                  </div>
+                </div>
+              ) : (
+                <div key={`t-${i}`} className="space-y-1.5">
+                  <div
+                    className="flex items-center gap-2 rounded-lg border px-3 py-2 text-xs"
+                    style={{
+                      borderColor: seg.tool.error ? "color-mix(in srgb, var(--red) 40%, transparent)" : "var(--card-border)",
+                      background: seg.tool.error ? "rgba(255,92,92,0.08)" : "color-mix(in srgb, var(--bg) 55%, transparent)",
+                      color: seg.tool.error ? "var(--red)" : "var(--text-dim)",
+                    }}
+                  >
+                    {seg.tool.durationMs === undefined ? (
+                      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" style={{ color: "var(--accent)" }} />
+                    ) : seg.tool.error ? (
+                      <XCircle className="h-3.5 w-3.5 shrink-0" />
+                    ) : (
+                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--green)" }} />
+                    )}
+                    {toolIcon(seg.tool.name)}
+                    <span className="font-semibold">{prettyName(seg.tool.name)}</span>
+                    {seg.tool.durationMs === undefined && <span className="ml-auto text-[10px] italic opacity-60">in progress…</span>}
+                    {seg.tool.durationMs !== undefined && (
+                      <span className="ml-auto font-mono text-[10px] opacity-70">{(seg.tool.durationMs / 1000).toFixed(1)}s</span>
+                    )}
+                  </div>
+                </div>
+              )
+            )
+          ) : (
+            <>
+              {/* History fallback: reasoning first, then tools in order */}
+              {reasoning && (
+                <div className="rounded-lg border-l-2 px-3 py-2" style={{ borderLeftColor: "var(--accent)", background: "rgba(124,108,255,0.06)" }}>
+                  <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold" style={{ color: "var(--text-faint)" }}>
+                    <Brain className="h-3 w-3" style={{ color: "var(--accent)" }} />
+                    Reasoning
+                  </div>
+                  <div className="whitespace-pre-wrap text-xs leading-relaxed" style={{ color: "var(--text-dim)" }}>
+                    {reasoning}
+                  </div>
+                </div>
+              )}
 
-          {merged.map((t, i) => (
-            <div key={i} className="space-y-1.5">
-              <div
-                className="flex items-center gap-2 rounded-lg border px-3 py-2 text-xs"
-                style={{
-                  borderColor: t.error ? "color-mix(in srgb, var(--red) 40%, transparent)" : "var(--card-border)",
-                  background: t.error ? "rgba(255,92,92,0.08)" : "color-mix(in srgb, var(--bg) 55%, transparent)",
-                  color: t.error ? "var(--red)" : "var(--text-dim)",
-                }}
-              >
-                {t.live ? (
-                  <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" style={{ color: "var(--accent)" }} />
-                ) : t.error ? (
-                  <XCircle className="h-3.5 w-3.5 shrink-0" />
-                ) : (
-                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--green)" }} />
-                )}
-                {toolIcon(t.name)}
-                <span className="font-semibold">{prettyName(t.name)}</span>
-                {t.live && <span className="ml-auto text-[10px] italic opacity-60">in progress…</span>}
-              </div>
-              {t.args && (
-                <Collapsible title={<span className="font-mono text-[10px]">args</span>}>
-                  <pre className="overflow-x-auto whitespace-pre-wrap text-[10px] leading-relaxed" style={{ color: "var(--text-dim)" }}>
-                    {t.args}
-                  </pre>
-                </Collapsible>
-              )}
-              {t.result !== undefined && (
-                <Collapsible title={<span className="font-mono text-[10px]">result ({t.result.length} chars)</span>}>
-                  <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap text-[10px] leading-relaxed" style={{ color: "var(--text-dim)" }}>
-                    {t.result || "(empty)"}
-                  </pre>
-                </Collapsible>
-              )}
-            </div>
-          ))}
+              {merged.map((t, i) => (
+                <div key={i} className="space-y-1.5">
+                  <div
+                    className="flex items-center gap-2 rounded-lg border px-3 py-2 text-xs"
+                    style={{
+                      borderColor: t.error ? "color-mix(in srgb, var(--red) 40%, transparent)" : "var(--card-border)",
+                      background: t.error ? "rgba(255,92,92,0.08)" : "color-mix(in srgb, var(--bg) 55%, transparent)",
+                      color: t.error ? "var(--red)" : "var(--text-dim)",
+                    }}
+                  >
+                    {t.live ? (
+                      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" style={{ color: "var(--accent)" }} />
+                    ) : t.error ? (
+                      <XCircle className="h-3.5 w-3.5 shrink-0" />
+                    ) : (
+                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--green)" }} />
+                    )}
+                    {toolIcon(t.name)}
+                    <span className="font-semibold">{prettyName(t.name)}</span>
+                    {t.live && <span className="ml-auto text-[10px] italic opacity-60">in progress…</span>}
+                  </div>
+                  {t.args && (
+                    <Collapsible title={<span className="font-mono text-[10px]">args</span>}>
+                      <pre className="overflow-x-auto whitespace-pre-wrap text-[10px] leading-relaxed" style={{ color: "var(--text-dim)" }}>
+                        {t.args}
+                      </pre>
+                    </Collapsible>
+                  )}
+                  {t.result !== undefined && (
+                    <Collapsible title={<span className="font-mono text-[10px]">result ({t.result.length} chars)</span>}>
+                      <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap text-[10px] leading-relaxed" style={{ color: "var(--text-dim)" }}>
+                        {t.result || "(empty)"}
+                      </pre>
+                    </Collapsible>
+                  )}
+                </div>
+              ))}
+            </>
+          )}
 
           {content && (
             <div className="rounded-lg border px-3 py-2" style={{ borderColor: "var(--card-border)" }}>

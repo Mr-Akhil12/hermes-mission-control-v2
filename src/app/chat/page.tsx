@@ -5,7 +5,7 @@ import {
   Send, Mic, MicOff, Volume2, MessageSquare, Plus, ChevronLeft, ChevronRight,
   Loader2, Trash2, Pencil, Square, CheckSquare, X, Maximize2, Minimize2,
 } from "lucide-react";
-import type { ChatMsg, ChatSettings, SessionMeta, StreamEvent, ToolEvent, RunStats, ToolCallInfo } from "@/lib/chat-types";
+import type { ChatMsg, ChatSettings, SessionMeta, StreamEvent, ToolEvent, ChainSegment, RunStats, ToolCallInfo } from "@/lib/chat-types";
 import { MessageBubble, MarkdownLite } from "@/components/chat/MessageBubble";
 import { ChatSettingsButton, DEFAULT_SETTINGS, loadSettings } from "@/components/chat/ChatSettings";
 import { Composer } from "@/components/chat/Composer";
@@ -21,6 +21,10 @@ type LiveState = {
   phase: RunPhase;
   reasoning: string;
   tools: ToolEvent[];
+  // Ordered live chain: reasoning and tool calls interleaved in the exact
+  // sequence they happened. The renderer walks this, so nothing ever
+  // disappears when the phase flips between thinking/tools/streaming.
+  chain: ChainSegment[];
   stats: RunStats | null;
   // tool call accounting for the current run
   toolCount: number;
@@ -31,6 +35,7 @@ const IDLE_LIVE: LiveState = {
   phase: "idle",
   reasoning: "",
   tools: [],
+  chain: [],
   stats: null,
   toolCount: 0,
   failedCount: 0,
@@ -40,11 +45,31 @@ function toolEventToRunTool(t: ToolEvent) {
   return t;
 }
 
+// Append a reasoning delta to the ordered chain: extend the LAST reasoning
+// segment if the most recent segment is reasoning; otherwise start a new
+// reasoning segment (after a tool call). This keeps reasoning and tools
+// interleaved in exact sequence, never split into disappearing sections.
+function appendReasoningToChain(chain: ChainSegment[], delta: string): ChainSegment[] {
+  if (!delta) return chain;
+  const last = chain[chain.length - 1];
+  if (last && last.kind === "reasoning") {
+    const copy = chain.slice(0, -1);
+    copy.push({ kind: "reasoning", text: last.text + delta });
+    return copy;
+  }
+  return [...chain, { kind: "reasoning", text: delta }];
+}
+
 export default function ChatPage() {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
+  // Live mirror of the currently-viewed session so the send() finally block
+  // can tell whether the user navigated away mid-run (the closure's activeId
+  // goes stale).
+  const activeIdRef = useRef<string | null>(null);
+  activeIdRef.current = activeId;
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -710,6 +735,7 @@ export default function ChatPage() {
         phase: "initializing",
         reasoning: "",
         tools: [],
+        chain: [],
         stats: { toolCount: 0, failedTools: 0, startedAt: Date.now(), usage: null, runtime: null },
         toolCount: 0,
         failedCount: 0,
@@ -854,15 +880,31 @@ export default function ChatPage() {
                 if (tname === "_thinking") {
                   if (delta) {
                     reasoning += delta;
-                    bumpLive({ reasoning, phase: liveRef.current.phase === "initializing" ? "thinking" : liveRef.current.phase });
+                    // Ordered chain: reasoning text accumulates into the LAST
+                    // reasoning segment (or starts one). Tools keep their own
+                    // segment, so reasoning never disappears when a tool fires.
+                    bumpLive({
+                      reasoning,
+                      chain: appendReasoningToChain(liveRef.current.chain, delta),
+                      phase: liveRef.current.phase === "initializing" ? "thinking" : liveRef.current.phase,
+                    });
                   }
                 } else {
                   // Real tool activity: register the tool + phase.
                   const exists = toolEvents.find((t) => t.name === tname && t.durationMs === undefined);
                   if (!exists) {
-                    toolEvents = [...toolEvents, { name: tname, startedAt: Date.now() }];
+                    const te: ToolEvent = { name: tname, startedAt: Date.now() };
+                    toolEvents = [...toolEvents, te];
                     toolCount += 1;
-                    bumpLive({ tools: toolEvents, toolCount, phase: "tools", stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
+                    bumpLive({
+                      tools: toolEvents,
+                      toolCount,
+                      // Append the tool to the ordered chain right after the
+                      // reasoning that preceded it.
+                      chain: [...liveRef.current.chain, { kind: "tool", tool: te }],
+                      phase: "tools",
+                      stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount },
+                    });
                   }
                 }
                 break;
@@ -871,13 +913,26 @@ export default function ChatPage() {
                 const tname = (payload as any).tool_name ?? "tool";
                 if (tname === "_thinking") break;
                 const exists = toolEvents.find((t) => t.name === tname && t.durationMs === undefined);
+                let te: ToolEvent | null = null;
                 if (!exists) {
-                  toolEvents = [...toolEvents, { name: tname, startedAt: Date.now(), preview: (payload as any).preview ?? undefined }];
+                  te = { name: tname, startedAt: Date.now(), preview: (payload as any).preview ?? undefined };
+                  toolEvents = [...toolEvents, te];
                   toolCount += 1;
                 } else {
                   toolEvents = toolEvents.map((t) => (t === exists ? { ...t, preview: (payload as any).preview ?? t.preview } : t));
+                  te = exists;
                 }
-                bumpLive({ tools: toolEvents, toolCount, phase: "tools", stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
+                bumpLive({
+                  tools: toolEvents,
+                  toolCount,
+                  // Ensure the tool is in the ordered chain even if a
+                  // tool.started raced ahead of tool.progress.
+                  chain: te && !liveRef.current.chain.some((c) => c.kind === "tool" && c.tool === te)
+                    ? [...liveRef.current.chain, { kind: "tool", tool: te }]
+                    : liveRef.current.chain,
+                  phase: "tools",
+                  stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount },
+                });
                 break;
               }
               case "tool.completed": {
@@ -890,7 +945,13 @@ export default function ChatPage() {
                     : t
                 );
                 if (isErr) failedCount += 1;
-                bumpLive({ tools: toolEvents, failedCount, stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
+                // Sync the same completion into the ordered chain's tool segment.
+                const chainSynced = liveRef.current.chain.map((c) =>
+                  c.kind === "tool" && c.tool.name === tname && c.tool.durationMs === undefined
+                    ? { ...c, tool: { ...c.tool, durationMs: durMs, error: isErr } }
+                    : c
+                );
+                bumpLive({ tools: toolEvents, failedCount, chain: chainSynced, stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
                 break;
               }
               case "tool.failed": {
@@ -901,7 +962,12 @@ export default function ChatPage() {
                     : t
                 );
                 failedCount += 1;
-                bumpLive({ tools: toolEvents, failedCount, stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
+                const chainFailed = liveRef.current.chain.map((c) =>
+                  c.kind === "tool" && c.tool.name === tname && c.tool.durationMs === undefined
+                    ? { ...c, tool: { ...c.tool, durationMs: Date.now() - c.tool.startedAt, error: true } }
+                    : c
+                );
+                bumpLive({ tools: toolEvents, failedCount, chain: chainFailed, stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
                 break;
               }
               case "assistant.completed": {
@@ -962,30 +1028,38 @@ export default function ChatPage() {
           setLive((prev) => ({ ...prev, phase: "error" }));
         }
       } finally {
+        // If the user switched to a different conversation mid-run, don't
+        // clobber the newly active session's display state — the stream that
+        // just ended belongs to the ORIGINAL session (sessionId), and its live
+        // state was already saved in liveBySessionRef when they navigated away.
+        // reattachRun restores it when they come back.
+        const stillViewing = activeIdRef.current === sessionId;
         setBusy(false);
-        setStreamedText("");
+        if (stillViewing) setStreamedText("");
         streamAbort.current = null;
         // Ensure the run settles to "done" even if the SSE tail (run.completed
         // with usage/runtime) was dropped through the proxy chain — the footer
         // should always appear with whatever stats we captured.
-        setLive((prev) => {
-          const settled: LiveState =
-            prev.phase === "error"
-              ? prev
-              : {
-                  ...prev,
-                  phase: "done",
-                  stats: {
-                    ...(prev.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }),
-                    completedAt: Date.now(),
-                    durationMs: Date.now() - (prev.stats?.startedAt ?? Date.now()),
-                  },
-                };
-          // Persist the last run's stats so the permanent footer keeps showing
-          // them after the run settles (idle state otherwise clears them).
-          if (settled.stats) setLastStats(settled.stats);
-          return settled;
-        });
+        if (stillViewing) {
+          setLive((prev) => {
+            const settled: LiveState =
+              prev.phase === "error"
+                ? prev
+                : {
+                    ...prev,
+                    phase: "done",
+                    stats: {
+                      ...(prev.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }),
+                      completedAt: Date.now(),
+                      durationMs: Date.now() - (prev.stats?.startedAt ?? Date.now()),
+                    },
+                  };
+            // Persist the last run's stats so the permanent footer keeps showing
+            // them after the run settles (idle state otherwise clears them).
+            if (settled.stats) setLastStats(settled.stats);
+            return settled;
+          });
+        }
         // Reconcile against ground truth ONLY when the SSE tail was dropped
         // (run.completed never arrived). When it did arrive, the local message
         // list + stats are already correct — reloading here would replace the
@@ -1103,16 +1177,47 @@ export default function ChatPage() {
             } else if (payload.event === "tool.started" || payload.event === "tool.progress") {
               livePhase = true;
               const tname = payload.tool_name ?? "tool";
+              // Reasoning deltas come through as _thinking tool.progress frames
+              // — accumulate them into both `reasoning` and the ordered chain.
+              if (tname === "_thinking") {
+                const delta = payload.delta ?? "";
+                if (delta) {
+                  setLive((p) => {
+                    const next = {
+                      ...p,
+                      reasoning: p.reasoning + delta,
+                      chain: appendReasoningToChain(p.chain, delta),
+                    };
+                    liveBySessionRef.current[sessionId] = { live: next, streamedText: liveBySessionRef.current[sessionId]?.streamedText ?? "" };
+                    return next;
+                  });
+                }
+                continue;
+              }
               setLive((p) => {
                 const tools = [...p.tools];
                 const exists = tools.find((t) => t.name === tname && t.durationMs === undefined);
-                if (!exists) tools.push({ name: tname, startedAt: Date.now() });
-                const next = { ...p, phase: "tools" as const, tools, toolCount: tools.length };
+                let te: ToolEvent;
+                if (!exists) {
+                  te = { name: tname, startedAt: Date.now() };
+                  tools.push(te);
+                } else {
+                  te = exists;
+                }
+                const chainHas = p.chain.some((c) => c.kind === "tool" && c.tool === te);
+                const next = {
+                  ...p,
+                  phase: "tools" as const,
+                  tools,
+                  toolCount: tools.length,
+                  chain: chainHas ? p.chain : [...p.chain, { kind: "tool" as const, tool: te }],
+                };
                 liveBySessionRef.current[sessionId] = { live: next, streamedText: liveBySessionRef.current[sessionId]?.streamedText ?? "" };
                 return next;
               });
             } else if (payload.event === "tool.completed" || payload.event === "tool.failed") {
               const tname = payload.tool_name ?? "tool";
+              if (tname === "_thinking") continue;
               const isErr = payload.event === "tool.failed" || !!payload.is_error;
               setLive((p) => {
                 const tools = p.tools.map((t) =>
@@ -1120,7 +1225,12 @@ export default function ChatPage() {
                     ? { ...t, durationMs: (payload.duration ?? 0) * 1000, error: isErr }
                     : t
                 );
-                const next = { ...p, tools, failedCount: p.failedCount + (isErr ? 1 : 0) };
+                const chain = p.chain.map((c) =>
+                  c.kind === "tool" && c.tool.name === tname && c.tool.durationMs === undefined
+                    ? { ...c, tool: { ...c.tool, durationMs: (payload.duration ?? 0) * 1000, error: isErr } }
+                    : c
+                );
+                const next = { ...p, tools, chain, failedCount: p.failedCount + (isErr ? 1 : 0) };
                 liveBySessionRef.current[sessionId] = { live: next, streamedText: liveBySessionRef.current[sessionId]?.streamedText ?? "" };
                 return next;
               });
@@ -1316,7 +1426,11 @@ export default function ChatPage() {
   }, [listening, send]);
 
   const selectSession = useCallback((id: string) => {
-    if (busy) return;
+    // Navigation works even while a run is in flight — the SSE stream stays
+    // attached server-side and reattachRun() re-joins it when we come back
+    // (or from another device). Blocking on `busy` is what made the sidebar
+    // feel dead during work (the old `if (busy) return`).
+    if (id === activeId) return;
     // Preserve the unsent draft of the conversation we're leaving.
     if (activeId) draftsRef.current[activeId] = input;
     // Save the current session's live state so we can restore it when the
@@ -1336,10 +1450,15 @@ export default function ChatPage() {
     }
     // Await the load so the sidebar doesn't briefly show the wrong conversation.
     void loadMessages(id);
+    // If the session we switched INTO is live, reattach to its stream.
+    const sess = sessions.find((s) => s.id === id);
+    if (sess?.is_active || liveBySessionRef.current[id]) {
+      void reattachRun(id);
+    }
     // On mobile the sidebar fills the whole view — close it after picking
     // so the conversation is visible. Desktop keeps it open.
     if (window.innerWidth < 768) setSidebarOpen(false);
-  }, [busy, loadMessages, activeId, input, live, streamedText]);
+  }, [activeId, loadMessages, input, live, streamedText, sessions, reattachRun]);
 
   const deleteSession = useCallback(async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -1451,10 +1570,6 @@ export default function ChatPage() {
     if (live.phase === "idle") return null;
     const showReasoning =
       live.reasoning && settings.reasoning !== "hidden";
-    const displayReasoning =
-      settings.reasoning === "partial" && live.reasoning.length > 900
-        ? live.reasoning.slice(-900)
-        : live.reasoning;
 
     const usingBrowser = live.tools.some(
       (t) =>
@@ -1463,37 +1578,44 @@ export default function ChatPage() {
         t.name.includes("web_search")
     );
 
+    // Ordered chain: reasoning and tool calls interleaved in the exact
+    // sequence they happened (reasoning → tool → reasoning → tool → answer).
+    // The chain persists across phase flips, so nothing disappears when the
+    // run moves from thinking to tools to streaming.
+    const chainSegments = live.chain.length > 0 ? live.chain : live.reasoning ? [{ kind: "reasoning" as const, text: live.reasoning }] : [];
+
     return (
       <div className="flex justify-start">
         <div className="max-w-[88%] min-w-0 rounded-2xl border px-4 py-2.5 text-sm" style={{ borderColor: "var(--card-border)", background: "color-mix(in srgb, var(--bg) 60%, transparent)", color: "var(--text)" }}>
           {usingBrowser && <BrowserView />}
-          {showReasoning && (
-            <div
-              ref={reasoningRef}
-              className="mb-2 whitespace-pre-wrap rounded-lg border-l-2 px-2.5 py-1.5 text-xs leading-relaxed"
-              style={{ borderLeftColor: "var(--accent)", background: "rgba(124,108,255,0.06)", color: "var(--text-dim)", maxHeight: 240, overflowY: "auto" }}
-            >
-              {displayReasoning}
-              {settings.reasoning === "partial" && live.reasoning.length > 900 && (
-                <div className="mt-1 text-[10px] italic opacity-60">(preview mode — showing tail)</div>
+          {showReasoning && chainSegments.length > 0 && (
+            <div className="mb-2 space-y-2">
+              {chainSegments.map((seg, i) =>
+                seg.kind === "reasoning" ? (
+                  <div
+                    key={`r-${i}`}
+                    className="whitespace-pre-wrap rounded-lg border-l-2 px-2.5 py-1.5 text-xs leading-relaxed"
+                    style={{ borderLeftColor: "var(--accent)", background: "rgba(124,108,255,0.06)", color: "var(--text-dim)", maxHeight: 240, overflowY: "auto" }}
+                  >
+                    {settings.reasoning === "partial" && seg.text.length > 900 ? seg.text.slice(-900) : seg.text}
+                    {settings.reasoning === "partial" && seg.text.length > 900 && (
+                      <div className="mt-1 text-[10px] italic opacity-60">(preview mode — showing tail)</div>
+                    )}
+                  </div>
+                ) : (
+                  <div key={`t-${i}`} className="flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs" style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}>
+                    {seg.tool.durationMs !== undefined ? (
+                      seg.tool.error ? <span style={{ color: "var(--red)" }}>✕</span> : <span style={{ color: "var(--green)" }}>✓</span>
+                    ) : (
+                      <Loader2 className="h-3 w-3 animate-spin" style={{ color: "var(--accent)" }} />
+                    )}
+                    <span className="truncate">{seg.tool.name.replace(/_/g, " ")}{seg.tool.preview ? ` — ${seg.tool.preview.slice(0, 80)}` : ""}</span>
+                    {seg.tool.durationMs !== undefined && (
+                      <span className="ml-auto font-mono text-[10px] opacity-70">{(seg.tool.durationMs / 1000).toFixed(1)}s</span>
+                    )}
+                  </div>
+                )
               )}
-            </div>
-          )}
-          {live.tools.length > 0 && settings.tools !== "count" && (
-            <div className="mb-2 space-y-1">
-              {live.tools.slice(-3).map((t, i) => (
-                <div key={`${t.name}-${i}`} className="flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs" style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}>
-                  {t.durationMs !== undefined ? (
-                    t.error ? <span style={{ color: "var(--red)" }}>✕</span> : <span style={{ color: "var(--green)" }}>✓</span>
-                  ) : (
-                    <Loader2 className="h-3 w-3 animate-spin" style={{ color: "var(--accent)" }} />
-                  )}
-                  <span className="truncate">{t.name.replace(/_/g, " ")}{t.preview ? ` — ${t.preview.slice(0, 80)}` : ""}</span>
-                  {t.durationMs !== undefined && (
-                    <span className="ml-auto font-mono text-[10px] opacity-70">{(t.durationMs / 1000).toFixed(1)}s</span>
-                  )}
-                </div>
-              ))}
               {live.tools.length > 3 && (
                 <button
                   onClick={() => setChainOpen(true)}
@@ -1822,6 +1944,7 @@ export default function ChatPage() {
                 reasoning={live.reasoning}
                 toolCalls={[]}
                 liveTools={live.tools}
+                chain={live.chain}
                 content={streamedText}
                 onClose={() => setChainOpen(false)}
               />

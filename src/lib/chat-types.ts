@@ -29,6 +29,13 @@ export type ToolEvent = {
   preview?: string;
 };
 
+// Ordered chain segment for the LIVE view — reasoning and tool calls are
+// rendered in the exact order they happened (reasoning → tool → reasoning →
+// tool → answer), never split into separate disappearing sections.
+export type ChainSegment =
+  | { kind: "reasoning"; text: string }
+  | { kind: "tool"; tool: ToolEvent };
+
 export type RunUsage = {
   input_tokens?: number;
   output_tokens?: number;
