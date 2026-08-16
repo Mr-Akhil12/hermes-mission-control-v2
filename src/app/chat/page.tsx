@@ -90,9 +90,11 @@ export default function ChatPage() {
     if (activeId) setInput(draftsRef.current[activeId] ?? "");
   }, [activeId]);
 
-  const loadSessions = useCallback(async () => {
+  const loadSessions = useCallback(async (source?: "chats" | "all") => {
     try {
-      const res = await fetch("/api/chat/sessions", { cache: "no-store" });
+      const src = source ?? sessionFilter;
+      const qs = src === "all" ? "?source=all" : "?source=dashboard";
+      const res = await fetch(`/api/chat/sessions${qs}`, { cache: "no-store" });
       const data = await res.json();
       const list: SessionMeta[] = data?.data ?? data?.sessions ?? [];
       setSessions(list);
@@ -103,7 +105,7 @@ export default function ChatPage() {
     } finally {
       setSessionsLoading(false);
     }
-  }, []);
+  }, [sessionFilter]);
 
   const loadMessages = useCallback(async (id: string) => {
     setMessagesLoading(true);
@@ -1266,7 +1268,11 @@ export default function ChatPage() {
                 {(["chats", "all"] as const).map((f) => (
                   <button
                     key={f}
-                    onClick={() => setSessionFilter(f)}
+                    onClick={() => {
+                      setSessionFilter(f);
+                      setSessionsLoading(true);
+                      loadSessions(f);
+                    }}
                     className="flex-1 rounded-lg px-2 py-1 text-[10px] font-semibold uppercase tracking-wide"
                     style={
                       sessionFilter === f

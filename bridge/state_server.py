@@ -103,15 +103,26 @@ def load_runs() -> list[dict]:
     ]
 
 
-def load_sessions(limit: int = 25) -> list[dict]:
+def load_sessions(limit: int = 25, source: str | None = None) -> list[dict]:
     if not STATE.exists():
         return []
     con = sqlite3.connect(STATE)
-    rows = con.execute(
-        "SELECT id, source, title, started_at, ended_at, end_reason, message_count, tool_call_count "
-        "FROM sessions ORDER BY started_at DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
+    if source == "dashboard":
+        # Chat list: only real conversations (dashboard + legacy empty source),
+        # never cron/subagent/dispatch noise — otherwise the top-N is flooded
+        # by cron runs and real chats vanish from the list.
+        rows = con.execute(
+            "SELECT id, source, title, started_at, ended_at, end_reason, message_count, tool_call_count "
+            "FROM sessions WHERE source = 'dashboard' OR source = '' OR source IS NULL "
+            "ORDER BY started_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    else:
+        rows = con.execute(
+            "SELECT id, source, title, started_at, ended_at, end_reason, message_count, tool_call_count "
+            "FROM sessions ORDER BY started_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
     sessions = []
     for r in rows:
         last = None
@@ -482,12 +493,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"runs": load_runs(), "source": "local"})
             elif path == "/api/sessions":
                 limit = 25
+                source = None
                 try:
                     q = self.path.split("?", 1)[1]
-                    limit = min(int(dict(kv.split("=") for kv in q.split("&") if "=" in kv).get("limit", 25)), 100)
+                    params = dict(kv.split("=") for kv in q.split("&") if "=" in kv)
+                    limit = min(int(params.get("limit", 25)), 100)
+                    source = params.get("source")
                 except Exception:
                     limit = 25
-                self._json({"sessions": load_sessions(limit), "source": "local"})
+                self._json({"sessions": load_sessions(limit, source), "source": "local"})
             elif path == "/api/artifacts":
                 self._json({"artifacts": load_artifacts(), "source": "local"})
             elif path == "/api/content":
