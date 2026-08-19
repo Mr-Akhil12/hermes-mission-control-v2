@@ -223,10 +223,11 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
-    loadSessions().then((list) => {
+    const resumeId = new URLSearchParams(window.location.search).get("resume");
+    loadSessions(resumeId ? "all" : undefined).then((list) => {
       // If arriving via a Resume link (e.g. from /sessions), open that exact
-      // session instead of the default most-recent one.
-      const resumeId = new URLSearchParams(window.location.search).get("resume");
+      // session instead of the default most-recent one. Load with source=all
+      // so cron/subagent sessions (not in the dashboard filter) resolve too.
       const target = resumeId ? list.find((s) => s.id === resumeId) : undefined;
       if (target) {
         setActiveId(target.id);
