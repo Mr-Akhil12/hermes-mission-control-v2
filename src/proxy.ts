@@ -80,6 +80,12 @@ export function proxy(req: NextRequest) {
     }
   }
 
+  // The native dashboard proxy is a full Hermes surface — require our session
+  // cookie so it can't be reached without unlocking the dashboard first.
+  if (pathname.startsWith("/native-proxy") && !sessionValid(req)) {
+    return withSecurityHeaders(NextResponse.json({ error: "unauthorized" }, { status: 401 }));
+  }
+
   return withSecurityHeaders(NextResponse.next());
 }
 
