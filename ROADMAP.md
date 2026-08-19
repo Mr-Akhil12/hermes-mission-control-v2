@@ -195,6 +195,13 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 - [x] Edge-case sweep — found + fixed: PIN hardcoded in auth-test.sh (scrubbed from history), `/native-proxy` unauthenticated (now gated). Verified: 15/15 API routes 401 unauthenticated, 7/7 authenticated, rate limit 429, cookie attrs, security headers, no PIN in client bundle, bridge 401/200, PWA manifest + SW live, dev workspace 50 projects
 - [x] Handoff: clone-ready dashboard, security closed, stubs real — ready for Akhil's end-to-end testing
 
+### Post-sprint fixes (19 Aug, from Akhil's E2E testing)
+- [x] Auth: biometric unlock no longer 401s — server session is the real gate (`/api/auth/session` probe, AuthGate falls through to PIN with clear message)
+- [x] Dev workspace: VERCEL_TOKEN swapped from device-bound CLI token (vca_) to personal API token (vcp_) — killed the 403 invalidToken on /dev
+- [x] Chat: finished attach-files-in-chat (resumed interrupted run — bridge endpoint, proxy route with STATE_BRIDGE_TOKEN, Composer picker, send() upload)
+- [x] Chat footer: context % now shows real current context (last run input) not lifetime cumulative — no more permanent "compaction imminent" on compressed sessions
+- [x] A32 arm setup: SSH key `hermes-arm` regenerated + `~/.ssh/config` entry (Host a32) — phone setup pending (Termux + Tailscale online)
+
 ---
 
 ## 6. How to update this file
