@@ -32,6 +32,15 @@ export async function verifyPin(pin: string): Promise<boolean> {
   }
 }
 
+export async function hasServerSession(): Promise<boolean> {
+  try {
+    const res = await fetch("/api/auth/session", { cache: "no-store" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function changePinUniversal(newPin: string): Promise<boolean> {
   const hash = await hashPin(newPin);
   try {

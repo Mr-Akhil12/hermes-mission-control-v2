@@ -6,6 +6,7 @@ import {
   isUnlocked,
   verifyPin,
   markUnlocked,
+  hasServerSession,
   biometricSupported,
   hasBiometric,
   authenticateBiometric,
@@ -21,25 +22,45 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const [bioTried, setBioTried] = useState(false);
   const bioAutoRef = useRef(false);
 
-  // The only state to manage is biometric registration (per-device, done in Settings).
+  // The server session cookie is the real gate. The local unlock flag only
+  // skips the PIN screen when a valid session exists — otherwise biometric
+  // unlock (which can't set the cookie) would render a shell that 401s on
+  // every API call.
   useEffect(() => {
     setBioEnabled(hasBiometric());
-    setReady(true);
-    setUnlocked(isUnlocked());
+    (async () => {
+      const local = isUnlocked();
+      const server = await hasServerSession();
+      if (local && server) {
+        setUnlocked(true);
+      } else if (local && !server) {
+        setError("Session expired — unlock with your PIN to reconnect.");
+        setBioTried(true);
+      }
+      setReady(true);
+    })();
   }, []);
 
   // ── Auto-biometric on unlock: try fingerprint/FaceID FIRST ───────
   // If biometrics are registered, attempt them automatically when the
   // unlock screen appears. Only fall back to PIN if they fail/cancel.
+  // Biometric success alone is NOT enough — the server session cookie
+  // must exist too, or every API call 401s.
   useEffect(() => {
     if (!ready || unlocked || !bioEnabled || bioAutoRef.current) return;
     bioAutoRef.current = true;
     setBusy(true);
     authenticateBiometric()
-      .then((ok) => {
+      .then(async (ok) => {
         if (ok) {
-          markUnlocked();
-          setUnlocked(true);
+          const server = await hasServerSession();
+          if (server) {
+            markUnlocked();
+            setUnlocked(true);
+          } else {
+            setBioTried(true);
+            setError("Biometric verified — enter your PIN to connect.");
+          }
         } else {
           setBioTried(true);
           setError("Biometric failed — enter your PIN.");
@@ -71,8 +92,14 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     const ok = await authenticateBiometric();
     setBusy(false);
     if (ok) {
-      markUnlocked();
-      setUnlocked(true);
+      const server = await hasServerSession();
+      if (server) {
+        markUnlocked();
+        setUnlocked(true);
+      } else {
+        setBioTried(true);
+        setError("Biometric verified — enter your PIN to connect.");
+      }
     } else {
       setError("Biometric verification failed.");
     }
