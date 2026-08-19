@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { Fingerprint, Lock, ShieldCheck, KeyRound } from "lucide-react";
 import {
   isUnlocked,
-  verifyPinUniversal,
+  verifyPin,
   markUnlocked,
   biometricSupported,
   hasBiometric,
@@ -21,7 +21,6 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const [bioTried, setBioTried] = useState(false);
   const bioAutoRef = useRef(false);
 
-  // The PIN is hardcoded (REDACTED) + synced to Turso — setup NEVER runs.
   // The only state to manage is biometric registration (per-device, done in Settings).
   useEffect(() => {
     setBioEnabled(hasBiometric());
@@ -56,7 +55,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const submitPin = async () => {
     setError(null);
     setBusy(true);
-    const ok = await verifyPinUniversal(pin);
+    const ok = await verifyPin(pin);
     setBusy(false);
     if (ok) {
       markUnlocked();

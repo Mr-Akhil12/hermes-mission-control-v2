@@ -1,12 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
+import { bridgeFetch } from "@/lib/bridge";
 
 // Session mutations: PATCH /api/chat/sessions/[id] (title, end_reason)
 // DELETE /api/chat/sessions/[id] — forwarded to the Hermes API.
-const DATA_URL = process.env.NEXT_PUBLIC_DATA_URL ?? "";
-
-function apiBase() {
-  return DATA_URL || "http://127.0.0.1:8645";
-}
 
 export async function PATCH(
   request: NextRequest,
@@ -15,7 +11,7 @@ export async function PATCH(
   const { id } = await params;
   try {
     const body = await request.json().catch(() => ({}));
-    const resp = await fetch(`${apiBase()}/api/sessions/${id}`, {
+    const resp = await bridgeFetch(`/api/sessions/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -34,7 +30,7 @@ export async function DELETE(
 ) {
   const { id } = await params;
   try {
-    const resp = await fetch(`${apiBase()}/api/sessions/${id}`, {
+    const resp = await bridgeFetch(`/api/sessions/${id}`, {
       method: "DELETE",
       cache: "no-store",
     });

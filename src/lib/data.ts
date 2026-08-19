@@ -70,7 +70,11 @@ export async function fetchState(endpoint: "crons" | "runs" | "sessions" | "arti
         sessions: `/api/sessions?limit=${limit}`,
         artifacts: "/api/artifacts",
       };
+      const headers: Record<string, string> = {};
+      const bridgeToken = process.env.STATE_BRIDGE_TOKEN ?? "";
+      if (bridgeToken) headers["Authorization"] = `Bearer ${bridgeToken}`;
       const res = await fetch(`${DATA_URL}${localPaths[endpoint]}`, {
+        headers,
         signal: AbortSignal.timeout(5000),
         cache: "no-store",
       });

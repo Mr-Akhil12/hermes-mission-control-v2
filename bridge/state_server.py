@@ -40,6 +40,8 @@ VAULT_CONTENT = Path("/mnt/c/Users/pilla/Vault/second-brain/Content")
 VAULT_ROOT = Path("/mnt/c/Users/pilla/Vault/second-brain")
 MEMORY_DIR = HERMES / "memories"
 PORT = int(os.environ.get("STATE_PORT", "8645"))
+BRIDGE_TOKEN = os.environ.get("STATE_BRIDGE_TOKEN", "")
+ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://hermes-mission-control-v2.vercel.app")
 
 
 def load_approvals() -> list[dict]:
@@ -497,16 +499,41 @@ def load_vault_note(folder: str, file: str) -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _authorized(self) -> bool:
+        if not BRIDGE_TOKEN:
+            return False
+        auth = self.headers.get("Authorization", "")
+        if auth == f"Bearer {BRIDGE_TOKEN}":
+            return True
+        return self.headers.get("X-Bridge-Token", "") == BRIDGE_TOKEN
+
+    def _cors_headers(self) -> dict:
+        return {
+            "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+            "Access-Control-Allow-Headers": "Authorization, Content-Type",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        }
+
     def _json(self, obj, status=200):
         body = json.dumps(obj).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        for k, v in self._cors_headers().items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
+    def do_OPTIONS(self):
+        self.send_response(204)
+        for k, v in self._cors_headers().items():
+            self.send_header(k, v)
+        self.end_headers()
+
     def do_GET(self):
+        if not self._authorized():
+            self._json({"error": "unauthorized"}, 401)
+            return
         try:
             path = self.path.split("?")[0]
             # Proxy the native Hermes dashboard (:9119) so the iframe can load
@@ -601,7 +628,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", ctype)
                 self.send_header("Cache-Control", "no-cache, no-transform")
                 self.send_header("X-Accel-Buffering", "no")
-                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
                 self.end_headers()
                 while True:
                     chunk = resp.read(4096)
@@ -631,7 +658,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(resp.status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
             self.end_headers()
             self.wfile.write(data)
         except Exception as e:
@@ -711,6 +738,9 @@ class Handler(BaseHTTPRequestHandler):
         return "Goal updated."
 
     def _proxy_native(self, path: str) -> None:
+        if not self._authorized():
+            self._json({"error": "unauthorized"}, 401)
+            return
         """Proxy a request to the native Hermes dashboard (:9119)."""
         import urllib.request as u
         native = os.environ.get("NATIVE_URL", "http://127.0.0.1:9119")
@@ -723,13 +753,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
             self.end_headers()
             self.wfile.write(data)
         except Exception as e:
             self._json({"error": str(e)}, 502)
 
     def do_POST(self):
+        if not self._authorized():
+            self._json({"error": "unauthorized"}, 401)
+            return
         """Proxy chat completions + session endpoints + run starts to the
         local Hermes API (:8642) so one ngrok tunnel serves live state, chat,
         streaming, and approvals."""
@@ -917,7 +950,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
         try:
@@ -956,6 +989,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def do_PATCH(self) -> None:
+        if not self._authorized():
+            self._json({"error": "unauthorized"}, 401)
+            return
         """Forward PATCH to the Hermes API — session title updates etc."""
         try:
             path = self.path.split("?")[0]
@@ -975,7 +1011,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(resp.status)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(data)))
-                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
                 self.end_headers()
                 self.wfile.write(data)
                 return
@@ -984,6 +1020,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(e)}, 502)
 
     def do_DELETE(self) -> None:
+        if not self._authorized():
+            self._json({"error": "unauthorized"}, 401)
+            return
         """Forward DELETE to the Hermes API — session deletion."""
         try:
             path = self.path.split("?")[0]
@@ -1001,7 +1040,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(resp.status)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(data)))
-                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
                 self.end_headers()
                 self.wfile.write(data)
                 return
@@ -1029,7 +1068,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(resp.status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
             self.end_headers()
             self.wfile.write(data)
         except Exception as e:
@@ -1188,7 +1227,7 @@ class Handler(BaseHTTPRequestHandler):
             ctype = resp.headers.get("Content-Type", "application/json")
             self.send_response(resp.status)
             self.send_header("Content-Type", ctype)
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
             self.send_header("Cache-Control", "no-cache")
             if stream:
                 # SSE: no Content-Length, chunked transfer. Use read1() so we
@@ -1215,7 +1254,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"state server on :{PORT} (SAST {datetime.now(SAST).isoformat()})", flush=True)
     server.serve_forever()
 

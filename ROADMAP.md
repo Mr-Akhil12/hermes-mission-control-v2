@@ -1,7 +1,7 @@
 # Hermes OS v2 — Feature Tracking & Roadmap
 
 **Repo:** `Mr-Akhil12/hermes-mission-control-v2` · **Live:** https://hermes-mission-control-v2.vercel.app
-**Started:** 6 Aug 2026 · **Status:** Phase 1 + Phase 2 complete, Phase 3 next
+**Started:** 6 Aug 2026 · **Status:** Phase 1 + Phase 2 complete, Phase 3 next · **Sprint:** Wed 19 → Sat 22 Aug (clone-ready + security)
 
 This is the single source of truth for what's built, what broke, what's next, and how desktop vs mobile differ. Every feature, every bug, every decision — tracked here.
 
@@ -158,7 +158,41 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 
 ---
 
-## 5. How to update this file
+## 5. Sprint — Wed Aug 19 → Sat Aug 22 (clone-ready + security)
+
+**Goal:** a dashboard someone can clone, run, and trust. Security closed, stubs real, every page ≥80%.
+
+**Where we are (audit 18 Aug):** 10/14 pages already ≥80% (Home 90, Approvals 90, Dispatch 88, Channels 88, Trading 88, Personal 88, Studio 85, Crons 85, Settings 85, Native 80). Broken: Agents 15 (pure stub), Dev 30 (hardcoded, never calls working `/api/artifacts`), Chat 60 (two 404 dangling fetches), Sessions 70 (dead Resume). Plus zero server-side auth, bridge open on `0.0.0.0:8645` with CORS `*`, PIN in client bundle.
+
+### Wed Aug 19 — Security foundation (the heavy lift)
+- [ ] Server session auth: login route, HttpOnly cookie, middleware gate on API routes
+- [ ] `STATE_BRIDGE_TOKEN` on the bridge; bind `127.0.0.1`; kill CORS `*`
+- [ ] PIN → Vercel secret (`AUTH_PIN_HASH`), server-side verify, no hardcoded fallback, no comments, history scrubbed
+- [ ] Rate limiting + security headers (CSP, X-Content-Type-Options, Referrer-Policy)
+- [ ] Verify every existing flow still works through the new auth (chat, approvals, push, dispatch)
+
+### Thu Aug 20 — Security completion + chat fixes
+- [ ] Tests: unauthenticated rejection, authenticated access, bridge token accept/reject
+- [ ] Fix the two 404s: add `/api/chat/sessions/{id}/fork` + `/model` routes (slash commands start working)
+- [ ] Config normalization: single source for `deepseek-v4-flash:0731`, reconcile `.env.example`
+- [ ] Start chat god-file extraction (session state → hook, stream state → hook)
+
+### Fri Aug 21 — Make the stubs real
+- [ ] `/agents` live: real agent state from the Hermes API (sessions, model, status) — kills the 15/100
+- [ ] `/dev` real: wire `/api/artifacts` (5-min fix, biggest bang) + git status via GitHub API + deployments via Vercel REST API — kills the 30/100
+- [ ] `/sessions` Resume button wired + `/crons` Output link fixed
+- [ ] Mobile pass on `/native` (relax fixed heights for small phones)
+
+### Sat Aug 22 — Clone-ready polish + ship
+- [ ] Dead buttons cleanup (studio/channels/approvals), offline SW fetch handler
+- [ ] README + docs + ROADMAP rewrite (what's done, how to run, env vars)
+- [ ] `lint` + `typecheck` + `build` clean, fix anything that breaks
+- [ ] Deploy to Vercel, verify live end-to-end (login, chat, approvals, push)
+- [ ] Handoff: clone-ready dashboard, security closed, stubs real
+
+---
+
+## 6. How to update this file
 
 - **After every build session:** mark features done, log new bugs, note decisions
 - **Bug log:** add row with root cause + fix — never delete, it's the lesson record

@@ -60,9 +60,12 @@ export async function POST(request: Request) {
     const timer = setTimeout(() => controller.abort(), 12000);
 
     try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      const bridgeToken = process.env.STATE_BRIDGE_TOKEN ?? "";
+      if (bridgeToken) headers["Authorization"] = `Bearer ${bridgeToken}`;
       const res = await fetch(`${proxyBase}/v1/runs`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(body),
         signal: controller.signal,
       });

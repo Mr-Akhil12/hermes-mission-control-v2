@@ -1,17 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
+import { bridgeFetch } from "@/lib/bridge";
 
 // Browser view stream: GET /api/browser/shot
 // Proxies the live MJPEG stream (multipart/x-mixed-replace) from the state
 // server — the chat page <img> plays it directly, no polling, no bloat.
-const DATA_URL = process.env.NEXT_PUBLIC_DATA_URL ?? "";
-
-function apiBase() {
-  return DATA_URL || "http://127.0.0.1:8645";
-}
 
 export async function GET(_request: NextRequest) {
   try {
-    const upstream = await fetch(`${apiBase()}/api/browser/shot`, {
+    const upstream = await bridgeFetch("/api/browser/shot", {
       cache: "no-store",
     });
     if (!upstream.ok || !upstream.body) {

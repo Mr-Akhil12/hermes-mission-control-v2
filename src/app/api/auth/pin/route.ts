@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 
 // Universal PIN storage: reads/writes the PIN hash in Turso app_settings.
-// The PIN is the same on every device (Turso is the source of truth);
-// the hardcoded REDACTED hash in auth.ts remains the offline master fallback.
+// The PIN is the same on every device (Turso is the source of truth).
 const TURSO_URL = process.env.TURSO_URL ?? "";
 const TURSO_TOKEN = process.env.TURSO_TOKEN ?? "";
 

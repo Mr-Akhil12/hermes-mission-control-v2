@@ -1,13 +1,9 @@
 import { NextRequest } from "next/server";
+import { bridgeFetch } from "@/lib/bridge";
 
 // Streaming chat: POST /api/chat/sessions/[id]/stream
 // Pipes SSE from the Hermes API (via state server tunnel) straight to the
 // browser so tokens + thinking appear in real time.
-const DATA_URL = process.env.NEXT_PUBLIC_DATA_URL ?? "";
-
-function apiBase() {
-  return DATA_URL || "http://127.0.0.1:8645";
-}
 
 export async function POST(
   request: NextRequest,
@@ -16,7 +12,7 @@ export async function POST(
   const { id } = await params;
   const body = await request.json().catch(() => ({}));
 
-  const upstream = await fetch(`${apiBase()}/api/sessions/${id}/chat/stream`, {
+  const upstream = await bridgeFetch(`/api/sessions/${id}/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

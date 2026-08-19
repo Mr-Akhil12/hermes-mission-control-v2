@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { Settings as SettingsIcon, Fingerprint, Database, Wifi, Lock, KeyRound, Bell, BellOff, Send, Trash2, Plus } from "lucide-react";
-import { lockNow, changePinUniversal, verifyPinUniversal, registerBiometric, hasBiometric, deleteBiometric } from "@/lib/auth";
+import { lockNow, changePinUniversal, verifyPin, registerBiometric, hasBiometric, deleteBiometric } from "@/lib/auth";
 import { useRouter } from "next/navigation";
 import { isPushSupported, getPushStatus, enablePush, disablePush, testPush } from "@/lib/push";
 
@@ -113,7 +113,7 @@ export default function SettingsPage() {
     if (newPin.length < 4) return setPinMsg({ ok: false, text: "New PIN must be at least 4 digits." });
     if (newPin !== confirmNewPin) return setPinMsg({ ok: false, text: "New PINs don't match." });
     setPinBusy(true);
-    const ok = await verifyPinUniversal(currentPin);
+    const ok = await verifyPin(currentPin);
     if (!ok) {
       setPinBusy(false);
       return setPinMsg({ ok: false, text: "Current PIN is wrong." });

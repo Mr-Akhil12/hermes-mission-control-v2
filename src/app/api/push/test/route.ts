@@ -1,15 +1,11 @@
 import { NextResponse } from "next/server";
+import { bridgeFetch } from "@/lib/bridge";
 
 // Push test — send a test notification to all subscriptions.
-const DATA_URL = process.env.NEXT_PUBLIC_DATA_URL ?? "";
-
-function apiBase() {
-  return DATA_URL || "http://127.0.0.1:8645";
-}
 
 export async function POST() {
   try {
-    const resp = await fetch(`${apiBase()}/api/push/test`, {
+    const resp = await bridgeFetch("/api/push/test", {
       method: "POST",
       cache: "no-store",
     });

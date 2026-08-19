@@ -35,9 +35,13 @@ export async function POST(request: Request) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 90000);
 
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const bridgeToken = process.env.STATE_BRIDGE_TOKEN ?? "";
+    if (bridgeToken) headers["Authorization"] = `Bearer ${bridgeToken}`;
+
     const res = await fetch(`${proxyBase}/v1/chat/completions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ model, messages, stream: false }),
       signal: controller.signal,
     });

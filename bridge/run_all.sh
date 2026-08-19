@@ -6,6 +6,8 @@ set -e
 export TURSO_URL="https://akhils-budget-mr-akhil12.aws-ap-northeast-1.turso.io"
 export TURSO_TOKEN="$(grep '^TURSO_AUTH_TOKEN=' /home/akhil/.hermes/secrets.md | cut -d= -f2-)"
 export API_SERVER_KEY="$(grep '^API_SERVER_KEY=' /home/akhil/.hermes/.env | cut -d= -f2- | tr -d '"' | tr -d "'")"
+export STATE_BRIDGE_TOKEN="$(grep '^STATE_BRIDGE_TOKEN=' /home/akhil/.hermes/secrets.md | cut -d= -f2-)"
+export ALLOWED_ORIGIN="https://hermes-mission-control-v2.vercel.app"
 export NATIVE_URL="http://127.0.0.1:9119"
 
 cd /home/akhil/hermes-mission-control-v2

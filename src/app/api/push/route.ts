@@ -1,16 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
+import { bridgeFetch } from "@/lib/bridge";
 
 // Push: proxy subscribe/unsubscribe/vapid/status/test to the local state
-// server (:8645) through the ngrok tunnel.
-const DATA_URL = process.env.NEXT_PUBLIC_DATA_URL ?? "";
-
-function apiBase() {
-  return DATA_URL || "http://127.0.0.1:8645";
-}
+// server through the ngrok tunnel.
 
 export async function GET() {
   try {
-    const resp = await fetch(`${apiBase()}/api/push/status`, { cache: "no-store" });
+    const resp = await bridgeFetch("/api/push/status", { cache: "no-store" });
     const data = await resp.json();
     return NextResponse.json(data);
   } catch (e) {
@@ -21,7 +17,7 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.text();
-    const resp = await fetch(`${apiBase()}/api/push/subscribe`, {
+    const resp = await bridgeFetch("/api/push/subscribe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body,
