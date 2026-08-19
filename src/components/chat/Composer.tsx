@@ -5,8 +5,16 @@
 // the fix for the laggy textbox: keystrokes no longer re-render everything.
 
 import { memo, useEffect, useRef } from "react";
-import { Mic, MicOff, Send, Square, Maximize2, Minimize2, Volume2 } from "lucide-react";
+import { Mic, MicOff, Send, Square, Maximize2, Minimize2, Volume2, Paperclip, X } from "lucide-react";
 import { SlashAutocomplete } from "./SlashAutocomplete";
+
+// An attachment the user picked in the composer — not yet uploaded.
+export type PendingAttachment = {
+  name: string;
+  size: number;
+  b64: string; // base64 payload (uploaded with the message)
+  mime: string;
+};
 
 export const Composer = memo(function Composer({
   input,
@@ -21,6 +29,8 @@ export const Composer = memo(function Composer({
   setComposerExpanded,
   voiceOn,
   setVoiceOn,
+  attachments,
+  setAttachments,
 }: {
   input: string;
   setInput: (v: string) => void;
@@ -34,8 +44,11 @@ export const Composer = memo(function Composer({
   setComposerExpanded: (v: boolean | ((p: boolean) => boolean)) => void;
   voiceOn: boolean;
   setVoiceOn: (v: boolean | ((p: boolean) => boolean)) => void;
+  attachments: PendingAttachment[];
+  setAttachments: (v: PendingAttachment[] | ((p: PendingAttachment[]) => PendingAttachment[])) => void;
 }) {
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   // Auto-resize the composer textarea to fit its content (wraps after one
   // line, grows up to a cap). Collapses back to a single line when cleared.
@@ -46,9 +59,77 @@ export const Composer = memo(function Composer({
     el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
   }, [input]);
 
+  const pickFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = "";
+    if (files.length === 0) return;
+    const allowed = files.filter((f) => f.size <= 20 * 1024 * 1024);
+    const oversized = files.length - allowed.length;
+    Promise.all(
+      allowed.map(
+        (f) =>
+          new Promise<PendingAttachment>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const b64 = String(reader.result ?? "").split(",")[1] ?? "";
+              resolve({ name: f.name, size: f.size, b64, mime: f.type || "application/octet-stream" });
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(f);
+          })
+      )
+    )
+      .then((items) => {
+        setAttachments((prev) => [...prev, ...items]);
+        if (oversized > 0 && !input.trim()) {
+          setInput(`⚠️ ${oversized} file(s) skipped (max 20MB). `);
+        }
+      })
+      .catch(() => {});
+  };
+
   return (
     <div className="relative flex items-end gap-2 border-t p-3" style={{ borderColor: "var(--card-border)" }}>
       <SlashAutocomplete input={input} onApply={setInput} />
+      <input
+        ref={fileRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={pickFiles}
+        aria-label="Attach files"
+      />
+      <button
+        onClick={() => fileRef.current?.click()}
+        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full"
+        style={{ background: "rgba(124,108,255,0.12)", color: "var(--accent)" }}
+        aria-label="Attach files"
+        title="Attach files (saved on the Hermes machine so I can read them)"
+      >
+        <Paperclip className="h-4 w-4" />
+      </button>
+      {attachments.length > 0 && (
+        <div className="absolute bottom-full left-3 flex max-w-full flex-wrap gap-1.5 pb-1.5">
+          {attachments.map((a, i) => (
+            <span
+              key={`${a.name}-${i}`}
+              className="flex max-w-[240px] items-center gap-1.5 rounded-lg border px-2 py-1 text-[10px]"
+              style={{ borderColor: "var(--card-border)", background: "rgba(124,108,255,0.08)", color: "var(--text-dim)" }}
+            >
+              <span className="truncate">{a.name}</span>
+              <span className="shrink-0 opacity-60">{(a.size / 1024).toFixed(0)}KB</span>
+              <button
+                onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
+                className="shrink-0 rounded p-0.5 hover:bg-white/10"
+                style={{ color: "var(--text-faint)" }}
+                aria-label={`Remove ${a.name}`}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
       <button
         onClick={toggleMic}
         className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full"

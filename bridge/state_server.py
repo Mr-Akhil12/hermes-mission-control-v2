@@ -737,6 +737,61 @@ class Handler(BaseHTTPRequestHandler):
             return f"⚠️ Goal failed: {result['error']}"
         return "Goal updated."
 
+    def _handle_attach(self) -> None:
+        """POST /api/chat/attach — save a chat attachment to disk.
+
+        Body: JSON {name, mime, b64} (the browser sends base64 via the Next
+        route, keeping the state server free of multipart parsing). Files land
+        in ~/.hermes/attachments/<ts>_<safe-name> so the agent's file tools
+        can read them on the next turn. A session_id is stored alongside the
+        file so the conversation can reference it.
+        """
+        import json as _json
+        import base64 as _b64
+        import re as _re
+        import uuid as _uuid
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length else b"{}"
+            payload = _json.loads(body or b"{}")
+        except Exception:
+            self._json({"error": "invalid JSON"}, 400)
+            return
+        name = str(payload.get("name") or "attachment").strip()
+        name = _re.sub(r"[^\w.\- ]", "_", name)[:120] or "attachment"
+        mime = str(payload.get("mime") or "application/octet-stream")
+        b64 = str(payload.get("b64") or "")
+        session_id = str(payload.get("session_id") or "")
+        if not b64:
+            self._json({"error": "b64 payload required"}, 400)
+            return
+        try:
+            raw = _b64.b64decode(b64)
+        except Exception as exc:
+            self._json({"error": f"bad base64: {exc}"}, 400)
+            return
+        # ~20MB cap — attachments are read into agent context, keep them sane.
+        if len(raw) > 20 * 1024 * 1024:
+            self._json({"error": "attachment too large (max 20MB)"}, 413)
+            return
+        att_dir = Path(os.path.expanduser("~/.hermes/attachments"))
+        att_dir.mkdir(parents=True, exist_ok=True)
+        fname = f"{_uuid.uuid4().hex[:8]}_{name}"
+        path = att_dir / fname
+        try:
+            path.write_bytes(raw)
+        except Exception as exc:
+            self._json({"error": f"write failed: {exc}"}, 500)
+            return
+        self._json({
+            "ok": True,
+            "path": str(path),
+            "name": name,
+            "mime": mime,
+            "size": len(raw),
+            "session_id": session_id,
+        })
+
     def _proxy_native(self, path: str) -> None:
         if not self._authorized():
             self._json({"error": "unauthorized"}, 401)
@@ -806,6 +861,11 @@ class Handler(BaseHTTPRequestHandler):
             # giving the dashboard chat the complete Hermes command surface.
             if path == "/api/chat/command":
                 self._exec_full_command()
+                return
+            # Chat attachment upload — saves the file to ~/.hermes/attachments
+            # so the agent can read it with its file tools in the next turn.
+            if path == "/api/chat/attach":
+                self._handle_attach()
                 return
             if path not in ("/v1/chat/completions", "/api/chat"):
                 self._json({"error": "not found"}, 404)

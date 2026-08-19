@@ -80,29 +80,37 @@ export function RunStatsFooter({
   // REAL cumulative usage for the whole session (from the sessions table,
   // maintained by Hermes on every API call). This is the persistent context
   // that adds up over time — NOT the last run's usage.
-  sessionUsage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number } | null;
+  sessionUsage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+    ended_at?: number | string | null;
+    end_reason?: string | null;
+  } | null;
 }) {
   const live =
     stats && phase !== "done" && phase !== "error" && phase !== "idle";
 
-  // Context % — REAL cumulative session input + live in-flight output estimate
-  // over the model's max window. The provider only reports exact usage when a
-  // call completes, so the only estimate left is the current in-flight output.
+  // Context % — the CURRENT context is the last completed run's input tokens
+  // (what's actually in the window now), NOT the session's lifetime cumulative
+  // total (which includes every compressed turn and permanently reads 100%+).
   const maxTokens = contextWindow && contextWindow > 0 ? contextWindow : 0;
-  const sessIn = sessionUsage?.input_tokens ?? 0;
-  const sessOut = sessionUsage?.output_tokens ?? 0;
+  const lastRunIn = stats?.usage?.input_tokens ?? 0;
   const liveOut = live ? (stats?.usage?.output_tokens ?? 0) : 0;
-  const usedTokens = sessIn + liveOut;
+  const usedTokens = live ? lastRunIn + liveOut : lastRunIn;
   const pct = maxTokens > 0 ? Math.min(100, Math.round((usedTokens / maxTokens) * 100)) : 0;
   const ctxLabel = maxTokens > 0
     ? `${usedTokens.toLocaleString()} / ${maxTokens >= 1_000_000 ? `${(maxTokens / 1_000_000).toFixed(0)}M` : `${(maxTokens / 1000).toFixed(0)}k`}`
     : "—";
   // Compaction warning — Hermes compresses at 90% of the context window
   // (config compression.threshold: 0.9). Warn as we approach it.
+  // A session that has already ended or was compressed is NOT heading to
+  // compaction — suppress the warning for those.
   const COMPACT_AT = 90;
   const WARN_AT = 75;
-  const compacting = pct >= COMPACT_AT;
-  const approaching = pct >= WARN_AT && pct < COMPACT_AT;
+  const sessionEnded = !!sessionUsage?.ended_at || (sessionUsage?.end_reason ?? null) !== null;
+  const compacting = !sessionEnded && pct >= COMPACT_AT;
+  const approaching = !sessionEnded && pct >= WARN_AT && pct < COMPACT_AT;
   // Pie: conic-gradient ring showing the % filled.
   const pieStyle =
     maxTokens > 0
@@ -151,13 +159,13 @@ export function RunStatsFooter({
         </span>
       )}
       <span className="flex items-center gap-1" title="Input tokens — real cumulative session context sent to the model">
-        ⬇ {fmtTokens(sessIn + (live ? 0 : 0))}
+        ⬇ {fmtTokens(sessionUsage?.input_tokens ?? 0)}
       </span>
       <span className="flex items-center gap-1" title="Output tokens — real cumulative session output (+ live in-flight estimate while running)">
-        ⬆ {fmtTokens(sessOut + liveOut)}
+        ⬆ {fmtTokens((sessionUsage?.output_tokens ?? 0) + liveOut)}
       </span>
       <span className="flex items-center gap-1" title="Total tokens — real cumulative session total">
-        Σ {fmtTokens(sessIn + sessOut + liveOut)}
+        Σ {fmtTokens((sessionUsage?.input_tokens ?? 0) + (sessionUsage?.output_tokens ?? 0) + liveOut)}
       </span>
       <span className="ml-auto">
         {live ? "running…" : `${fmtDuration(stats?.durationMs)} total`}

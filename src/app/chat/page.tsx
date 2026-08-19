@@ -9,7 +9,7 @@ import type { ChatMsg, ChatSettings, StreamEvent, ToolEvent, ChainSegment, RunSt
 import { useSessions } from "@/lib/use-sessions";
 import { MessageBubble, MarkdownLite } from "@/components/chat/MessageBubble";
 import { ChatSettingsButton, DEFAULT_SETTINGS, loadSettings } from "@/components/chat/ChatSettings";
-import { Composer } from "@/components/chat/Composer";
+import { Composer, type PendingAttachment } from "@/components/chat/Composer";
 import { SlashAutocomplete } from "@/components/chat/SlashAutocomplete";
 import { PhaseBanner, RunStatsFooter, type RunPhase } from "@/components/chat/RunStatus";
 import { MessageSkeleton, SessionListSkeleton } from "@/components/chat/Skeleton";
@@ -115,6 +115,7 @@ export default function ChatPage() {
   // Per-conversation unsent draft text, preserved when navigating between chats.
   const draftsRef = useRef<Record<string, string>>({});
   const [composerExpanded, setComposerExpanded] = useState(false);
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
 
   // Load display settings once.
   useEffect(() => {
@@ -686,7 +687,7 @@ export default function ChatPage() {
   const pendingQueue = useRef<string[]>([]);
   const send = useCallback(
     async (text: string) => {
-      const trimmed = text.trim();
+      let trimmed = text.trim();
       if (!trimmed) return;
 
       // Lazy session creation: if there's no active session yet (fresh
@@ -762,6 +763,32 @@ export default function ChatPage() {
       if (sessionId) draftsRef.current[sessionId] = "";
       setInput("");
       setRetryTarget(trimmed);
+      // Upload any pending attachments and append their saved paths so the
+      // agent can read the files with its tools this turn.
+      let attachPaths: string[] = [];
+      if (attachments.length > 0) {
+        try {
+          const results = await Promise.all(
+            attachments.map(async (a) => {
+              const res = await fetch("/api/chat/attach", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: a.name, mime: a.mime, b64: a.b64, session_id: sessionId }),
+              });
+              const data = await res.json();
+              return data?.path ?? null;
+            })
+          );
+          attachPaths = results.filter(Boolean);
+        } catch {
+          attachPaths = [];
+        }
+        setAttachments([]);
+      }
+      if (attachPaths.length > 0) {
+        const attachNote = attachPaths.map((p) => `[Attached file: ${p}]`).join("\n");
+        trimmed = `${trimmed}\n\n${attachNote}`;
+      }
       setMessages((m) => [...m, { role: "user", content: trimmed }]);
       setBusy(true);
       setError(null);
@@ -1161,20 +1188,15 @@ export default function ChatPage() {
           cache: "no-store",
         });
         if (!res.ok || !res.body) return;
-        // Server returned an empty/closed stream when no run is live.
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
         let livePhase = false;
-        setBusy(true);
+        // Do NOT flip busy / restore the old spinning snapshot until the
+        // FIRST real frame proves the run is still alive. Otherwise a
+        // finished run (or one that rotated away on compression) leaves the
+        // UI stuck on "busy + loading tools" forever.
         streamSessionRef.current = sessionId;
-        // Preserve prior live state so late subscribers keep prior tools.
-        const prev = liveBySessionRef.current[sessionId]?.live;
-        if (prev && prev.phase !== "idle" && prev.phase !== "done") {
-          setLive(prev);
-        } else {
-          setLive((p) => (p.phase === "idle" ? { ...p, phase: "thinking" } : p));
-        }
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -1195,8 +1217,19 @@ export default function ChatPage() {
             }
             if (!payload.event) payload = { ...payload, event };
             lastSeqRef.current[sessionId] = payload.seq ?? lastSeqRef.current[sessionId] ?? 0;
-            if (payload.event === "run.started" || payload.event === "message.started") {
+            // First real event → now we know the run is live; restore the
+            // pre-existing state and go busy.
+            if (!livePhase) {
               livePhase = true;
+              setBusy(true);
+              const prev = liveBySessionRef.current[sessionId]?.live;
+              if (prev && prev.phase !== "idle" && prev.phase !== "done") {
+                setLive(prev);
+              } else {
+                setLive((p) => (p.phase === "idle" ? { ...p, phase: "thinking" } : p));
+              }
+            }
+            if (payload.event === "run.started" || payload.event === "message.started") {
               setLive((p) => ({ ...p, phase: "thinking" }));
             } else if (payload.event === "assistant.delta") {
               livePhase = true;
@@ -1318,13 +1351,22 @@ export default function ChatPage() {
             }
           }
         }
-        // Stream closed without a terminal event but the run was live —
-        // reconcile from the server so nothing is lost.
+        // Stream closed. If the run was live, reconcile from the server so
+        // nothing is lost; otherwise this was a finished/rotated run — either
+        // way release the attach marker so future reattaches aren't blocked.
         if (livePhase) {
           setBusy(false);
-          streamSessionRef.current = null;
           await loadMessages(sessionId);
+        } else if (busyRef.current && streamSessionRef.current === sessionId) {
+          // The run finished before we reattached; a stale busy from the
+          // original send may still be set — clear it so the UI never stays
+          // stuck on "loading".
+          setBusy(false);
+          // Reconcile the messages from the server so any final answer that
+          // landed while we were away shows up.
+          await loadMessages(sessionId).catch(() => {});
         }
+        streamSessionRef.current = null;
       } catch {
         // Aborted (new send started) or transient — the 15s session poll
         // will re-trigger reattach if the run is still live.
@@ -2024,13 +2066,17 @@ export default function ChatPage() {
               setComposerExpanded={setComposerExpanded}
               voiceOn={voiceOn}
               setVoiceOn={setVoiceOn}
+              attachments={attachments}
+              setAttachments={setAttachments}
             />
 
-            {/* Composer — expanded: fills the chat container (not the viewport) */}
+            {/* Composer — expanded: fills the chat container (not the viewport).
+                Uses the same translucent + blur overlay style as the
+                conversations sidebar, not a heavy solid card. */}
             {composerExpanded && (
               <div
                 className="absolute inset-0 z-20 flex flex-col"
-                style={{ background: "var(--card)", borderColor: "var(--card-border)" }}
+                style={{ background: "color-mix(in srgb, var(--bg-2) 97%, transparent)", backdropFilter: "blur(2px)", borderColor: "var(--card-border)" }}
               >
                 <div className="flex items-center justify-between border-b px-4 py-2" style={{ borderColor: "var(--card-border)" }}>
                   <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>

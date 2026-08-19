@@ -751,32 +751,34 @@ function DeploymentsTab({ project }: { project: Project }) {
         ) : vercel && vercel.length > 0 ? (
           <ul className="space-y-2">
             {vercel.map((d) => (
-              <li key={d.uid} className="flex items-center gap-3 rounded-lg px-2 py-1.5 hover:bg-white/5">
+              <li key={d.uid} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg px-2 py-1.5 hover:bg-white/5">
                 <span
                   className="h-2 w-2 shrink-0 rounded-full"
                   style={{ background: readyStateColor(d.readyState) }}
                 />
-                <div className="min-w-0 flex-1">
+                <div className="min-w-0 flex-1 basis-full sm:basis-auto">
                   {d.url ? (
                     <a
                       href={`https://${d.url}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 truncate text-sm hover:underline"
+                      className="inline-flex max-w-full items-center gap-1 truncate text-sm hover:underline"
                       style={{ color: "var(--accent-2)" }}
                     >
-                      {d.url}
+                      <span className="truncate">{d.url}</span>
                       <ExternalLink className="h-3 w-3 shrink-0" />
                     </a>
                   ) : (
-                    <span className="text-sm">{d.uid}</span>
+                    <span className="break-all text-sm">{d.uid}</span>
                   )}
                   <div className="text-[11px]" style={{ color: "var(--text-faint)" }}>
                     {fmtSASTRelative(d.created)}
                   </div>
                 </div>
-                <Badge color={readyStateColor(d.readyState)}>{d.readyState}</Badge>
-                {d.target && <Badge color="var(--text-faint)">{d.target}</Badge>}
+                <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                  <Badge color={readyStateColor(d.readyState)}>{d.readyState}</Badge>
+                  {d.target && <Badge color="var(--text-faint)">{d.target}</Badge>}
+                </span>
               </li>
             ))}
           </ul>
@@ -800,15 +802,17 @@ function DeploymentsTab({ project }: { project: Project }) {
         ) : github && github.length > 0 ? (
           <ul className="space-y-2">
             {github.map((d) => (
-              <li key={d.id} className="flex items-center gap-3 rounded-lg px-2 py-1.5 hover:bg-white/5">
+              <li key={d.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg px-2 py-1.5 hover:bg-white/5">
                 <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: "var(--accent-2)" }} />
-                <div className="min-w-0 flex-1">
-                  <span className="truncate text-sm">{d.environment}</span>
-                  <div className="text-[11px]" style={{ color: "var(--text-faint)" }}>
+                <div className="min-w-0 flex-1 basis-full sm:basis-auto">
+                  <span className="block truncate text-sm">{d.environment}</span>
+                  <div className="truncate text-[11px]" style={{ color: "var(--text-faint)" }}>
                     {d.ref} · {fmtSASTRelative(d.created_at)}
                   </div>
                 </div>
-                <Badge color="var(--text-faint)">{d.environment}</Badge>
+                <span className="ml-auto shrink-0">
+                  <Badge color="var(--text-faint)">{d.environment}</Badge>
+                </span>
               </li>
             ))}
           </ul>
