@@ -1,12 +1,13 @@
 "use client";
 
 import { Network, Activity } from "lucide-react";
+import { DEFAULT_MODEL } from "@/lib/models";
 
 export default function AgentsPage() {
   const agents = [
     { name: "SOL", role: "Important decisions / critical tasks", status: "idle", model: "gpt-5.6-sol" },
     { name: "LUNA", role: "Images + vision", status: "idle", model: "gpt-5.6-luna" },
-    { name: "DEEPSEEK", role: "Daily driver / cron agent", status: "idle", model: "deepseek-v4-flash:0731" },
+    { name: "DEEPSEEK", role: "Daily driver / cron agent", status: "idle", model: DEFAULT_MODEL },
   ];
 
   return (

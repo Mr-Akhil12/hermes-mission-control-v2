@@ -14,32 +14,7 @@ import { PhaseBanner, RunStatsFooter, type RunPhase } from "@/components/chat/Ru
 import { MessageSkeleton, SessionListSkeleton } from "@/components/chat/Skeleton";
 import { BrowserView } from "@/components/chat/BrowserView";
 import { ChainView } from "@/components/chat/ChainView";
-
-const MODEL = "deepseek-v4-flash:0731";
-
-// Context window (max input tokens) per model — used for the footer's
-// context % pie. Unknown models fall back to the default.
-const CONTEXT_WINDOWS: Record<string, number> = {
-  "deepseek-v4-flash:0731": 1_000_000,
-  "deepseek-v4-flash": 1_000_000,
-  "deepseek-v3.2": 131_072,
-  "gemini-2.5-flash": 1_048_576,
-  "gemini-3.7-flash": 1_048_576,
-  "minimax-m2.7": 204_800,
-  "claude-sonnet-4": 1_000_000,
-  "gpt-5.6-sol": 400_000,
-};
-const CONTEXT_WINDOW_DEFAULT = 1_000_000;
-
-// Resolve a model's context window (max input tokens) for the footer pie.
-function contextWindowFor(model?: string | null): number {
-  if (!model) return CONTEXT_WINDOW_DEFAULT;
-  const key = model.toLowerCase();
-  for (const [name, w] of Object.entries(CONTEXT_WINDOWS)) {
-    if (key.includes(name.toLowerCase())) return w;
-  }
-  return CONTEXT_WINDOW_DEFAULT;
-}
+import { DEFAULT_MODEL as MODEL, contextWindowFor } from "@/lib/models";
 
 type LiveState = {
   phase: RunPhase;
@@ -427,7 +402,7 @@ export default function ChatPage() {
         case "model": {
           if (!activeId) return true;
           if (!arg) {
-            setMessages((m) => [...m, { role: "system", content: "Usage: `/model <name>` — e.g. `/model deepseek-v4-flash:0731`. Model locks the session (runtime verified server-side)." }]);
+            setMessages((m) => [...m, { role: "system", content: `Usage: \`/model <name>\` — e.g. \`/model ${MODEL}\`. Model locks the session (runtime verified server-side).` }]);
             return true;
           }
           try {

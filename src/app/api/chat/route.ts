@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { DEFAULT_MODEL } from "@/lib/models";
 
 export async function POST(request: Request) {
   try {
@@ -15,7 +16,7 @@ export async function POST(request: Request) {
     const DATA_URL = process.env.NEXT_PUBLIC_DATA_URL ?? "";
     const proxyBase =
       DATA_URL && apiBase.startsWith("http://127.0.0.1") ? DATA_URL : apiBase;
-    const model = process.env.HERMES_API_MODEL ?? "deepseek-v4-flash:0731";
+    const model = process.env.HERMES_API_MODEL ?? DEFAULT_MODEL;
 
     const messages = [
       {

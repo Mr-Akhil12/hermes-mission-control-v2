@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { DEFAULT_MODEL } from "@/lib/models";
 
 // Dispatch: try the real Hermes API (via tunnel); if unreachable, queue the
 // task into Turso `tasks` — the bridge polls it every 30s and runs it.
@@ -54,7 +55,7 @@ export async function POST(request: Request) {
     // 1. Try the real Hermes API (run path produces approvals).
     const body = {
       input: `[dispatch:${profile}] ${prompt}`,
-      model: process.env.HERMES_API_MODEL ?? "deepseek-v4-flash:0731",
+      model: process.env.HERMES_API_MODEL ?? DEFAULT_MODEL,
     };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 12000);
