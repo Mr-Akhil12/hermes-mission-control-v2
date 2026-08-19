@@ -224,7 +224,14 @@ export default function ChatPage() {
 
   useEffect(() => {
     loadSessions().then((list) => {
-      if (list.length > 0) {
+      // If arriving via a Resume link (e.g. from /sessions), open that exact
+      // session instead of the default most-recent one.
+      const resumeId = new URLSearchParams(window.location.search).get("resume");
+      const target = resumeId ? list.find((s) => s.id === resumeId) : undefined;
+      if (target) {
+        setActiveId(target.id);
+        loadMessages(target.id);
+      } else if (list.length > 0) {
         setActiveId(list[0].id);
         loadMessages(list[0].id);
       } else {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Clock, ChevronDown, ChevronUp, ExternalLink, Brain, CheckCircle2, XCircle, Loader2, Search, Send } from "lucide-react";
+import { Clock, ChevronDown, ChevronUp, Brain, CheckCircle2, XCircle, Loader2, Search, Send } from "lucide-react";
 import { fmtSAST, fmtSASTSec } from "@/lib/time";
 import { humanizeCron, humanizeDeliver } from "@/lib/cron";
 
@@ -263,11 +263,6 @@ export default function CronsPage() {
                     {cron.script && <span>· script: {cron.script}</span>}
                     <span className="flex items-center gap-1">
                       <Send className="h-3 w-3" /> {humanizeDeliver(cron.deliver).label}
-                    </span>
-                    <span className="ml-auto">
-                      <a href="/crons" className="inline-flex items-center gap-1" style={{ color: "var(--accent-2)" }}>
-                        Output link <ExternalLink className="h-3 w-3" />
-                      </a>
                     </span>
                   </div>
                 </div>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { MessageSquare, RotateCcw, AlertCircle, CheckCircle2, Clock, Loader2 } from "lucide-react";
 import { fmtSAST } from "@/lib/time";
 
@@ -92,9 +93,9 @@ export default function SessionsPage() {
                 <span>
                   {s.ended_at ? `Stopped ${fmt(s.ended_at)}` : "Still active"}
                 </span>
-                <button className="ml-auto flex items-center gap-1 font-semibold" style={{ color: "var(--accent)" }}>
+                <Link href={`/chat?resume=${s.id}`} className="ml-auto inline-flex items-center gap-1 font-semibold" style={{ color: "var(--accent)" }}>
                   <RotateCcw className="h-3.5 w-3.5" /> Resume
-                </button>
+                </Link>
               </div>
             </div>
           ))}

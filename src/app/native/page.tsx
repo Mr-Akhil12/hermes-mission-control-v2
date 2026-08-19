@@ -33,7 +33,7 @@ export default function NativePage() {
   }, []);
 
   return (
-    <div className="relative mx-auto max-w-[1600px]">
+    <div className="relative mx-auto w-full max-w-[1600px]">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-bold">
@@ -69,7 +69,7 @@ export default function NativePage() {
       </div>
 
       {/* Frame */}
-      <div className="relative h-[calc(100vh-190px)] min-h-[480px] overflow-hidden rounded-xl border" style={{ borderColor: "var(--card-border)" }}>
+      <div className="relative h-[calc(100vh-190px)] min-h-[60vh] overflow-hidden rounded-xl border" style={{ borderColor: "var(--card-border)" }}>
         {/* Crime-scene tape: shown when iframe can't connect */}
         {offline && (
           <div className="tape-banner">
