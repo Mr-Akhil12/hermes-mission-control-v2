@@ -165,11 +165,11 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 **Where we are (audit 18 Aug):** 10/14 pages already ≥80% (Home 90, Approvals 90, Dispatch 88, Channels 88, Trading 88, Personal 88, Studio 85, Crons 85, Settings 85, Native 80). Broken: Agents 15 (pure stub), Dev 30 (hardcoded, never calls working `/api/artifacts`), Chat 60 (two 404 dangling fetches), Sessions 70 (dead Resume). Plus zero server-side auth, bridge open on `0.0.0.0:8645` with CORS `*`, PIN in client bundle.
 
 ### Wed Aug 19 — Security foundation (the heavy lift)
-- [ ] Server session auth: login route, HttpOnly cookie, middleware gate on API routes
-- [ ] `STATE_BRIDGE_TOKEN` on the bridge; bind `127.0.0.1`; kill CORS `*`
-- [ ] PIN → Vercel secret (`AUTH_PIN_HASH`), server-side verify, no hardcoded fallback, no comments, history scrubbed
-- [ ] Rate limiting + security headers (CSP, X-Content-Type-Options, Referrer-Policy)
-- [ ] Verify every existing flow still works through the new auth (chat, approvals, push, dispatch)
+- [x] Server session auth: login route, HttpOnly cookie, middleware gate on API routes
+- [x] `STATE_BRIDGE_TOKEN` on the bridge; bind `127.0.0.1`; kill CORS `*`
+- [x] PIN → Vercel secret (`AUTH_PIN_HASH`), server-side verify, no hardcoded fallback, no comments, history scrubbed
+- [x] Rate limiting + security headers (CSP, X-Content-Type-Options, Referrer-Policy)
+- [x] Verify every existing flow still works through the new auth (chat, approvals, push, dispatch)
 
 ### Thu Aug 20 — Security completion + chat fixes
 - [ ] Tests: unauthenticated rejection, authenticated access, bridge token accept/reject
