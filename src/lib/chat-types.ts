@@ -10,6 +10,10 @@ export type ChatMsg = {
   // full chain (reasoning → tool → reasoning → tool → answer), not just
   // the final text.
   toolCalls?: ToolCallInfo[];
+  // Per-message stats (model + token count) shown at the end of the bubble.
+  // Populated from the persisted row's token_count + session model, and
+  // from the live run's completed usage. Replaces the persistent footer bar.
+  stats?: { model?: string; tokens?: number } | null;
 };
 
 export type ToolCallInfo = {

@@ -170,6 +170,17 @@ export const MessageBubble = memo(function MessageBubble({
         <div className="whitespace-pre-wrap break-words">
           <MarkdownLite text={msg.content} />
         </div>
+        {!isUser && msg.stats && (msg.stats.model || msg.stats.tokens !== undefined) && (
+          <div
+            className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[9px]"
+            style={{ color: "var(--text-faint)" }}
+          >
+            {msg.stats.model && <span>{msg.stats.model}</span>}
+            {msg.stats.tokens !== undefined && msg.stats.tokens > 0 && (
+              <span>{msg.stats.tokens.toLocaleString()} tokens</span>
+            )}
+          </div>
+        )}
         {hasChain && (
           <button
             onClick={() => setChainOpen(true)}

@@ -1,7 +1,8 @@
 import { NextRequest } from "next/server";
 import { bridgeFetch } from "@/lib/bridge";
+import { withProfile } from "@/lib/profiles";
 
-// Reattach stream: GET /api/chat/sessions/[id]/events?since=<seq>
+// Reattach stream: GET /api/chat/sessions/[id]/events?since=<seq>&profile=<id>
 // Proxies the Hermes API's reattachable run stream (via state server tunnel).
 // Replays missed events (reasoning/tools/messages) since the client's last
 // seen seq, then tails live — so leaving the page or hopping devices never
@@ -13,8 +14,10 @@ export async function GET(
 ) {
   const { id } = await params;
   const since = request.nextUrl.searchParams.get("since") ?? "0";
+  const profile = request.nextUrl.searchParams.get("profile") ?? "";
 
-  const upstream = await bridgeFetch(`/api/sessions/${id}/events?since=${since}`, {
+  const path = withProfile(`/api/sessions/${id}/events?since=${since}`, profile);
+  const upstream = await bridgeFetch(path, {
     cache: "no-store",
   });
 

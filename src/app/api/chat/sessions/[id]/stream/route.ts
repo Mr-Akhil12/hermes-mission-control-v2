@@ -1,9 +1,11 @@
 import { NextRequest } from "next/server";
 import { bridgeFetch } from "@/lib/bridge";
+import { withProfile } from "@/lib/profiles";
 
 // Streaming chat: POST /api/chat/sessions/[id]/stream
 // Pipes SSE from the Hermes API (via state server tunnel) straight to the
 // browser so tokens + thinking appear in real time.
+// ?profile=<id> routes to that Hermes multiplex profile.
 
 export async function POST(
   request: NextRequest,
@@ -11,8 +13,10 @@ export async function POST(
 ) {
   const { id } = await params;
   const body = await request.json().catch(() => ({}));
+  const profile = (body as { profile?: string })?.profile ?? "";
 
-  const upstream = await bridgeFetch(`/api/sessions/${id}/chat/stream`, {
+  const path = withProfile(`/api/sessions/${id}/chat/stream`, profile);
+  const upstream = await bridgeFetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

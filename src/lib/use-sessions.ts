@@ -16,13 +16,17 @@ export function useSessions({ setError }: UseSessionsOptions) {
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("chats");
+  // Current multiplex profile — threaded into the list query so switching
+  // profiles lists that profile's conversations.
+  const [profile, setProfile] = useState<string>("");
 
   const loadSessions = useCallback(
     async (source?: SessionFilter) => {
       try {
         const src = source ?? sessionFilter;
         const qs = src === "all" ? "?source=all" : "?source=dashboard";
-        const res = await fetch(`/api/chat/sessions${qs}`, { cache: "no-store" });
+        const profileQs = profile ? `&profile=${encodeURIComponent(profile)}` : "";
+        const res = await fetch(`/api/chat/sessions${qs}${profileQs}`, { cache: "no-store" });
         const data = await res.json();
         const list: SessionMeta[] = data?.data ?? data?.sessions ?? [];
         setSessions(list);
@@ -34,7 +38,7 @@ export function useSessions({ setError }: UseSessionsOptions) {
         setSessionsLoading(false);
       }
     },
-    [sessionFilter, setError]
+    [sessionFilter, profile, setError]
   );
 
   return {
@@ -45,6 +49,8 @@ export function useSessions({ setError }: UseSessionsOptions) {
     setActiveId,
     sessionFilter,
     setSessionFilter,
+    profile,
+    setProfile,
     loadSessions,
   };
 }

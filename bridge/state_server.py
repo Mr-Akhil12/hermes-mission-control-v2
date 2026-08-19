@@ -548,7 +548,19 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "unauthorized"}, 401)
             return
         try:
-            path = self.path.split("?")[0]
+            full_path = self.path.split("?")[0]
+            path = full_path
+            # Profile-multiplexed paths arrive as /p/<profile>/api/... —
+            # LOCAL data handlers strip the prefix (crons/sessions list/push
+            # are machine-wide, not profile-scoped); upstream-forwarding
+            # handlers use the FULL path so the Hermes API /p/<profile>/…
+            # mirrors route to the right profile.
+            profile_prefix = ""
+            if path.startswith("/p/"):
+                parts = path.split("/")
+                if len(parts) >= 4:
+                    profile_prefix = "/" + "/".join(parts[1:3])  # /p/<profile>
+                    path = "/" + "/".join(parts[3:])
             # Proxy the native Hermes dashboard (:9119) so the iframe can load
             # it over HTTPS (mixed-content safe) through the tunnel.
             if path.startswith("/native/"):
@@ -570,6 +582,13 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/runs":
                 self._json({"runs": load_runs(), "source": "local"})
             elif path == "/api/sessions":
+                if profile_prefix:
+                    # Profile-multiplexed session list — each profile has its
+                    # OWN state.db, so the local loader (default profile) can't
+                    # answer. Forward upstream so the Hermes API /p/<profile>/
+                    # mirror lists that profile's sessions.
+                    self._proxy_api_get(path)
+                    return
                 limit = 25
                 source = None
                 try:
@@ -626,7 +645,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _proxy_api_get_stream(self, path: str) -> None:
         """Forward a GET to the Hermes API (:8642) with chunked SSE streaming
-        (used by /api/sessions/{id}/events reattach)."""
+        (used by /api/sessions/{id}/events reattach).
+
+        Uses a short socket timeout so quiet reasoning stretches (no bytes for
+        a while) never kill the reattach stream: on every socket timeout we
+        write an SSE keepalive comment frame — which keeps Vercel/ngrok and
+        the browser's fetch from idling out — then keep reading. The stream
+        only ends when the upstream actually closes.
+        """
+        import socket as _socket
         import urllib.request as u
         api = os.environ.get("HERMES_API_URL", "http://127.0.0.1:8642")
         api_key = os.environ.get("API_SERVER_KEY", "")
@@ -635,7 +662,9 @@ class Handler(BaseHTTPRequestHandler):
             headers["Authorization"] = f"Bearer {api_key}"
         req = u.Request(f"{api}{self.path}", headers=headers)
         try:
-            with u.urlopen(req, timeout=30) as resp:
+            # 15s socket read budget: long enough to not spam, short enough
+            # that a healthy upstream that is quiet >15s gets a keepalive.
+            with u.urlopen(req, timeout=15) as resp:
                 self.send_response(resp.status)
                 ctype = resp.headers.get("Content-Type", "text/event-stream")
                 self.send_header("Content-Type", ctype)
@@ -644,12 +673,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
                 self.end_headers()
                 while True:
-                    chunk = resp.read(4096)
-                    if not chunk:
-                        break
                     try:
+                        chunk = resp.read(4096)
+                        if not chunk:
+                            break
                         self.wfile.write(chunk)
                         self.wfile.flush()
+                    except _socket.timeout:
+                        # Quiet upstream: heartbeat so proxies + browser
+                        # keepalive and never see a dead-looking connection.
+                        try:
+                            self.wfile.write(b": keepalive\n\n")
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError):
+                            break
                     except (BrokenPipeError, ConnectionResetError):
                         break
         except Exception as e:
@@ -835,14 +872,22 @@ class Handler(BaseHTTPRequestHandler):
         local Hermes API (:8642) so one ngrok tunnel serves live state, chat,
         streaming, and approvals."""
         try:
-            path = self.path.split("?")[0]
+            full_path = self.path.split("?")[0]
+            path = full_path
+            # Profile-multiplexed paths: strip /p/<profile> for LOCAL dispatch
+            # (the upstream proxy uses self.path = full path so the Hermes API
+            # /p/<profile>/… mirrors route to the right profile).
+            if path.startswith("/p/"):
+                parts = path.split("/")
+                if len(parts) >= 4:
+                    path = "/" + "/".join(parts[3:])
             # Session endpoints: create, chat, chat/stream, fork
             if path.startswith("/api/sessions"):
-                self._proxy_api_stream(path, stream=path.endswith("/chat/stream"))
+                self._proxy_api_stream(full_path, stream=full_path.endswith("/chat/stream"))
                 return
             # Run approval resolution: POST /v1/runs/{run_id}/approval
             if "/v1/runs/" in path and path.endswith("/approval"):
-                self._proxy_api_stream(path, stream=False)
+                self._proxy_api_stream(full_path, stream=False)
                 return
             # Run start: POST /v1/runs — returns run_id; immediately subscribe
             # to the run's event stream to capture approval.request events.
@@ -1296,7 +1341,9 @@ class Handler(BaseHTTPRequestHandler):
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         req = u.Request(f"{api}{path}", data=body, headers=headers)
-        with u.urlopen(req, timeout=300) as resp:
+        # 15s socket read budget (see keepalive loop below) — a quiet
+        # upstream gets a heartbeat every ~15s so the stream never looks dead.
+        with u.urlopen(req, timeout=15) as resp:
             ctype = resp.headers.get("Content-Type", "application/json")
             self.send_response(resp.status)
             self.send_header("Content-Type", ctype)
@@ -1308,14 +1355,26 @@ class Handler(BaseHTTPRequestHandler):
                 # blocking until the 4096-byte buffer fills (read() blocks to
                 # fill amt, which buffers small SSE events until the stream
                 # ends — the "shimmer then full response" bug).
+                # 15s socket budget + keepalive: a long quiet reasoning stretch
+                # must not look dead to Vercel/ngrok/browser.
+                import socket as _socket
                 self.send_header("X-Accel-Buffering", "no")
                 self.end_headers()
                 while True:
-                    chunk = resp.read1(4096)
-                    if not chunk:
+                    try:
+                        chunk = resp.read1(4096)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                    except _socket.timeout:
+                        try:
+                            self.wfile.write(b": keepalive\n\n")
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError):
+                            break
+                    except (BrokenPipeError, ConnectionResetError):
                         break
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
             else:
                 data = resp.read()
                 self.send_header("Content-Length", str(len(data)))

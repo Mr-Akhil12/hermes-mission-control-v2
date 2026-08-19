@@ -1,15 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { bridgeFetch } from "@/lib/bridge";
+import { withProfile } from "@/lib/profiles";
 
-// Session messages: GET /api/chat/sessions/[id]/messages
+// Session messages: GET /api/chat/sessions/[id]/messages?profile=<id>
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  const profile = request.nextUrl.searchParams.get("profile") ?? "";
   try {
-    const resp = await bridgeFetch(`/api/sessions/${id}/messages`, {
+    const path = withProfile(`/api/sessions/${id}/messages`, profile);
+    const resp = await bridgeFetch(path, {
       cache: "no-store",
     });
     const data = await resp.json();

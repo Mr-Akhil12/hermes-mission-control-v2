@@ -3,19 +3,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Send, Mic, MicOff, Volume2, MessageSquare, Plus, ChevronLeft, ChevronRight,
-  Loader2, Trash2, Pencil, Square, CheckSquare, X, Maximize2, Minimize2,
+  Loader2, Trash2, Pencil, Square, CheckSquare, X, Maximize2, Minimize2, Bot,
 } from "lucide-react";
 import type { ChatMsg, ChatSettings, StreamEvent, ToolEvent, ChainSegment, RunStats, ToolCallInfo } from "@/lib/chat-types";
 import { useSessions } from "@/lib/use-sessions";
+import { PROFILES, profileLabel } from "@/lib/profiles";
 import { MessageBubble, MarkdownLite } from "@/components/chat/MessageBubble";
 import { ChatSettingsButton, DEFAULT_SETTINGS, loadSettings } from "@/components/chat/ChatSettings";
 import { Composer, type PendingAttachment } from "@/components/chat/Composer";
 import { SlashAutocomplete } from "@/components/chat/SlashAutocomplete";
-import { PhaseBanner, RunStatsFooter, type RunPhase } from "@/components/chat/RunStatus";
+import { PhaseBanner, type RunPhase } from "@/components/chat/RunStatus";
 import { MessageSkeleton, SessionListSkeleton } from "@/components/chat/Skeleton";
 import { BrowserView } from "@/components/chat/BrowserView";
 import { ChainView } from "@/components/chat/ChainView";
-import { DEFAULT_MODEL as MODEL, contextWindowFor } from "@/lib/models";
+import { DEFAULT_MODEL as MODEL } from "@/lib/models";
 
 type LiveState = {
   phase: RunPhase;
@@ -101,6 +102,8 @@ export default function ChatPage() {
     setActiveId,
     sessionFilter,
     setSessionFilter,
+    profile,
+    setProfile,
     loadSessions,
   } = useSessions({ setError });
   const [messagesLoading, setMessagesLoading] = useState(false);
@@ -182,9 +185,11 @@ export default function ChatPage() {
   const loadMessages = useCallback(async (id: string) => {
     setMessagesLoading(true);
     try {
-      const res = await fetch(`/api/chat/sessions/${id}/messages`, { cache: "no-store" });
+      const profileQs = profile ? `?profile=${encodeURIComponent(profile)}` : "";
+      const res = await fetch(`/api/chat/sessions/${id}/messages${profileQs}`, { cache: "no-store" });
       const data = await res.json();
       const list = data?.data ?? [];
+      const modelName = MODEL;
       // The Hermes API persists each assistant fragment as its own row —
       // thinking text between tool calls, empty frames, and the final reply.
       // Live view shows one continuous reply; history must too. Merge
@@ -245,6 +250,15 @@ export default function ChatPage() {
           content: m.content ?? "",
           reasoning: m.reasoning_content ?? m.reasoning ?? null,
           toolCalls,
+          // Per-message stats: the persisted row's token_count + the session
+          // model (from the session list) — shown at the end of the bubble.
+          stats:
+            m.role === "assistant"
+              ? {
+                  model: modelName,
+                  tokens: typeof m.token_count === "number" ? m.token_count : undefined,
+                }
+              : null,
         };
         if (msg.role === "assistant") {
           if (pending) {
@@ -273,7 +287,7 @@ export default function ChatPage() {
     } finally {
       setMessagesLoading(false);
     }
-  }, []);
+  }, [profile]);
 
   useEffect(() => {
     const resumeId = new URLSearchParams(window.location.search).get("resume");
@@ -754,12 +768,11 @@ export default function ChatPage() {
           const res = await fetch("/api/chat/sessions", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            // Pin the session to the dashboard's model. Without this the API
-            // server persists its virtual model name ("hermes-agent") as the
-            // session model, which then beats the per-request model on every
-            // turn — ollama-cloud 404s on "hermes-agent" and the fallback
-            // chain silently lands on gemini-2.5-flash.
-            body: JSON.stringify({ model: MODEL }),
+            // Pin the session to the dashboard's model + profile. Without the
+            // model pin the API server persists its virtual model name
+            // ("hermes-agent") which beats the per-request model on every
+            // turn; the profile pin routes to that multiplex profile.
+            body: JSON.stringify({ model: MODEL, profile }),
           });
           const data = await res.json();
           const id = data?.session?.id ?? data?.session_id ?? data?.data?.id;
@@ -910,7 +923,7 @@ export default function ChatPage() {
         const res = await fetch(`/api/chat/sessions/${sessionId}/stream`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: trimmed, model: MODEL }),
+          body: JSON.stringify({ message: trimmed, model: MODEL, profile }),
           signal: abort.signal,
         });
         if (!res.ok || !res.body) {
@@ -921,15 +934,19 @@ export default function ChatPage() {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
-        // Stall watchdog: if no SSE event lands for 90s, abort the fetch so
-        // the finally block reconciles from the server and flushes the queue.
-        // Prevents the "busy forever, messages silently dropped" failure.
+        // Stall watchdog: if no SSE event lands for 180s (long reasoning on
+        // a quiet provider, slow proxy hops), DO NOT abort the run — the run
+        // lives on the laptop and keeps going. Just drop this read loop so
+        // the finally block reattaches (replays from the saved seq) instead
+        // of killing the stream. The browser is a view, not the owner.
         let lastEventAt = Date.now();
+        let stalled = false;
         const stallTimer = setInterval(() => {
-          if (Date.now() - lastEventAt > 90_000) {
+          if (Date.now() - lastEventAt > 180_000) {
+            stalled = true;
             abort.abort();
           }
-        }, 15_000);
+        }, 20_000);
 
         try {
         while (true) {
@@ -1138,6 +1155,25 @@ export default function ChatPage() {
                     runtime: runRuntime,
                   },
                 });
+                // Attach per-message stats to the final assistant bubble so the
+                // model + token count show at the end of the message (replaces
+                // the old persistent footer bar).
+                setMessages((prev) => {
+                  const copy = [...prev];
+                  for (let i = copy.length - 1; i >= 0; i--) {
+                    if (copy[i].role === "assistant") {
+                      copy[i] = {
+                        ...copy[i],
+                        stats: {
+                          model: runRuntime?.model ?? MODEL,
+                          tokens: runUsage?.total_tokens ?? runUsage?.input_tokens ?? undefined,
+                        },
+                      };
+                      break;
+                    }
+                  }
+                  return copy;
+                });
                 break;
               }
               case "done": {
@@ -1241,7 +1277,7 @@ export default function ChatPage() {
         }
       }
     },
-    [busy, activeId, voiceOn, loadSessions, loadMessages, handleSlash]
+    [busy, activeId, voiceOn, loadSessions, loadMessages, handleSlash, profile]
   );
 
   sendRef.current = send;
@@ -1267,7 +1303,8 @@ export default function ChatPage() {
       if (streamSessionRef.current === sessionId && busyRef.current) return;
       try {
         const m = getModuleLive(sessionId);
-        const res = await fetch(`/api/chat/sessions/${sessionId}/events?since=${lastSeqRef.current[sessionId] ?? m.lastSeq ?? 0}`, {
+        const profileQs = profile ? `&profile=${encodeURIComponent(profile)}` : "";
+        const res = await fetch(`/api/chat/sessions/${sessionId}/events?since=${lastSeqRef.current[sessionId] ?? m.lastSeq ?? 0}${profileQs}`, {
           cache: "no-store",
         });
         if (!res.ok || !res.body) return;
@@ -1453,7 +1490,31 @@ export default function ChatPage() {
         if (livePhase) {
           setBusy(false);
           m.busy = false;
+          // The run may have COMPLETED while the SSE died (proxy hop drop,
+          // Vercel function limit, quiet-reasoning stall). loadMessages below
+          // fetches ground truth; if a final assistant answer exists, the run
+          // is over — settle every still-spinning live tool so the UI never
+          // shows "loading forever" for tools that already finished.
           await loadMessages(sessionId);
+          setLive((p) => {
+            const stillPending = p.tools.some((t) => t.durationMs === undefined);
+            if (!stillPending) return p;
+            // Mark every pending tool as completed (duration unknown but done).
+            const now = Date.now();
+            const tools = p.tools.map((t) =>
+              t.durationMs === undefined
+                ? { ...t, durationMs: Math.max(1, now - (t.startedAt ?? now)) }
+                : t
+            );
+            const chain = p.chain.map((c) =>
+              c.kind === "tool" && c.tool.durationMs === undefined
+                ? { ...c, tool: { ...c.tool, durationMs: Math.max(1, now - (c.tool.startedAt ?? now)) } }
+                : c
+            );
+            const next = { ...p, tools, chain, phase: p.phase === "streaming" ? p.phase : ("done" as const) };
+            m.live = next;
+            return next;
+          });
         } else if (busyRef.current && streamSessionRef.current === sessionId) {
           // The run finished before we reattached; a stale busy from the
           // original send may still be set — clear it so the UI never stays
@@ -1473,7 +1534,7 @@ export default function ChatPage() {
         streamSessionRef.current = null;
       }
     },
-    [loadMessages]
+    [loadMessages, profile]
   );
 
   // Reattach when: the page becomes visible again (tab switch / app return),
@@ -2109,6 +2170,48 @@ export default function ChatPage() {
 
           {/* Messages */}
           <div className="flex min-w-0 flex-1 flex-col">
+            {/* Profile switcher — who am I talking to. Switching loads that
+                profile's conversations (Hermes multiplex /p/<profile>/). */}
+            <div className="flex flex-wrap items-center gap-1.5 border-b px-3 py-1.5" style={{ borderColor: "var(--card-border)" }}>
+              <span className="mr-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider" style={{ color: "var(--text-faint)" }}>
+                <Bot className="h-3.5 w-3.5" style={{ color: "var(--accent)" }} /> Talking to
+              </span>
+              <select
+                value={profile}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setProfile(next);
+                  setMessages([]);
+                  setStreamedText("");
+                  setLive(IDLE_LIVE);
+                  setBusy(false);
+                  setActiveId(null);
+                  setSessionsLoading(true);
+                  loadSessions().then((list) => {
+                    if (list.length > 0) {
+                      setActiveId(list[0].id);
+                      loadMessages(list[0].id);
+                    } else {
+                      setMessagesLoading(false);
+                    }
+                  });
+                }}
+                className="rounded-lg border bg-transparent px-2 py-1 text-xs font-semibold outline-none"
+                style={{ borderColor: "var(--card-border)", color: "var(--accent-2)" }}
+                aria-label="Switch profile"
+              >
+                {PROFILES.map((p) => (
+                  <option key={p.id || "default"} value={p.id}>
+                    {p.label} — {p.role}
+                  </option>
+                ))}
+              </select>
+              {profile !== "" && (
+                <span className="text-[10px]" style={{ color: "var(--text-faint)" }}>
+                  {profileLabel(profile)} profile — separate conversations, separate memory
+                </span>
+              )}
+            </div>
             <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
               {messagesLoading ? (
                 <MessageSkeleton />
@@ -2123,7 +2226,7 @@ export default function ChatPage() {
                   {messages.map((m, i) => (
                     <MessageBubble key={`${m.role}-${i}`} msg={m} settings={settings} />
                   ))}
-                  {busy && <PhaseBanner phase={live.phase} toolCount={live.toolCount} elapsedSec={elapsedSec} sessionUsage={sessions.find((s) => s.id === activeId) ?? null} />}
+                  {busy && <PhaseBanner phase={live.phase} toolCount={live.toolCount} elapsedSec={elapsedSec} />}
                   {busy && renderLiveContent()}
                 </>
               )}
@@ -2147,24 +2250,8 @@ export default function ChatPage() {
               </div>
             )}
 
-            {/* Permanent run stats — model, tools, context usage. Always visible
-                above the composer so it's constantly monitorable. Shows the last
-                run's stats when idle, live stats while a run is in progress.
-                Context % + input/output/total come from the session's REAL
-                cumulative usage (sessions table, maintained by Hermes on every
-                API call) so they persist and add up over time — not the last
-                run's usage. */}
-            <div className="border-t px-3 py-1.5" style={{ borderColor: "var(--card-border)" }}>
-              <RunStatsFooter
-                stats={live.phase !== "idle" && live.stats ? live.stats : lastStats}
-                phase={live.phase !== "idle" ? live.phase : "done"}
-                contextWindow={contextWindowFor((live.phase !== "idle" && live.stats?.runtime?.model) || lastStats?.runtime?.model || MODEL)}
-                sessionUsage={sessions.find((s) => s.id === activeId) ?? null}
-              />
-            </div>
-
             {/* Composer — extracted component so typing doesn't re-render the
-                whole page (sidebar + stats + messages). Fixes textbox lag. */}
+                whole page (sidebar + messages). Fixes textbox lag. */}
             <Composer
               input={input}
               setInput={setInput}

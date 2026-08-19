@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { bridgeFetch } from "@/lib/bridge";
+import { withProfile } from "@/lib/profiles";
 
 // Set session model: POST /api/chat/sessions/[id]/model — forwarded to the Hermes API.
+// ?profile=<id> routes to that Hermes multiplex profile.
 
 export async function POST(
   request: NextRequest,
@@ -10,7 +12,9 @@ export async function POST(
   const { id } = await params;
   try {
     const body = await request.json().catch(() => ({}));
-    const resp = await bridgeFetch(`/api/sessions/${id}/model`, {
+    const profile = (body as { profile?: string })?.profile ?? "";
+    const path = withProfile(`/api/sessions/${id}/model`, profile);
+    const resp = await bridgeFetch(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
