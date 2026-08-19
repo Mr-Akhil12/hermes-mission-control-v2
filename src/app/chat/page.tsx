@@ -41,6 +41,37 @@ const IDLE_LIVE: LiveState = {
   failedCount: 0,
 };
 
+// ── Module-scoped live-stream persistence ─────────────────────────────
+// ChatPage unmounts when the user navigates to another tab (SPA route
+// change). All the per-session stream state below lives at module scope so
+// it SURVIVES navigation — the chain, tools, streamed text, and SSE seq
+// counter are restored on return instead of reset, which is what makes
+// "leave the chat and come back" keep the live UI intact (the user's core
+// streaming complaint). A single active stream is tracked (single-user).
+type ModuleLiveState = {
+  live: LiveState;
+  streamedText: string;
+  busy: boolean;
+  streamSession: string | null;
+  lastSeq: number;
+};
+
+const moduleLive: Record<string, ModuleLiveState> = {};
+const lastSeqState: Record<string, number> = {};
+
+function getModuleLive(sessionId: string): ModuleLiveState {
+  if (!moduleLive[sessionId]) {
+    moduleLive[sessionId] = {
+      live: { ...IDLE_LIVE },
+      streamedText: "",
+      busy: false,
+      streamSession: null,
+      lastSeq: 0,
+    };
+  }
+  return moduleLive[sessionId];
+}
+
 function toolEventToRunTool(t: ToolEvent) {
   return t;
 }
@@ -125,6 +156,27 @@ export default function ChatPage() {
   // Restore the unsent draft for the newly active conversation.
   useEffect(() => {
     if (activeId) setInput(draftsRef.current[activeId] ?? "");
+  }, [activeId]);
+
+  // Restore the module-scoped live stream state when remounting this page
+  // (after navigating to another tab). If the run is still going, reattach
+  // picks up from the saved seq; if it finished, we show the settled state.
+  useEffect(() => {
+    if (!activeId) return;
+    const saved = moduleLive[activeId];
+    if (saved) {
+      if (saved.live.phase !== "idle" && saved.live.phase !== "done") {
+        setLive(saved.live);
+        setStreamedText(saved.streamedText);
+        setBusy(saved.busy);
+        setLastStats(saved.live.stats);
+      } else if (saved.live.phase === "done") {
+        setLive(saved.live);
+        setStreamedText(saved.streamedText);
+        setLastStats(saved.live.stats);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId]);
 
   const loadMessages = useCallback(async (id: string) => {
@@ -801,6 +853,12 @@ export default function ChatPage() {
         toolCount: 0,
         failedCount: 0,
       });
+      if (sessionId) {
+        const m = getModuleLive(sessionId);
+        m.busy = true;
+        m.streamSession = sessionId;
+        m.live = { ...IDLE_LIVE, phase: "initializing", stats: m.live.stats };
+      }
       setStreamedText("");
 
       const abort = new AbortController();
@@ -835,7 +893,15 @@ export default function ChatPage() {
           const next = { ...prev, ...patch };
           // Keep the per-session snapshot fresh so switching back to this
           // conversation restores the live stream where it left off.
-          if (sessionId) liveBySessionRef.current[sessionId] = { live: next, streamedText };
+          if (sessionId) {
+            liveBySessionRef.current[sessionId] = { live: next, streamedText: full };
+            // Module-scope mirror: survives ChatPage unmount (tab switch),
+            // so returning to Chat restores the live run mid-flight.
+            const m = getModuleLive(sessionId);
+            m.live = next;
+            m.streamedText = full;
+            m.lastSeq = lastSeqState[sessionId] ?? m.lastSeq;
+          }
           return next;
         });
       };
@@ -917,6 +983,8 @@ export default function ChatPage() {
                   if (sessionId) {
                     const snap = liveBySessionRef.current[sessionId];
                     if (snap) liveBySessionRef.current[sessionId] = { ...snap, streamedText: full };
+                    // Module mirror — survives unmount (tab switch).
+                    getModuleLive(sessionId).streamedText = full;
                   }
                   if (liveRef.current.phase !== "tools") bumpLive({ phase: "streaming" });
                   // Live token estimate so the footer's output-token count
@@ -1098,6 +1166,9 @@ export default function ChatPage() {
         const stillViewing = activeIdRef.current === sessionId;
         setBusy(false);
         if (stillViewing) setStreamedText("");
+        if (sessionId) {
+          getModuleLive(sessionId).busy = false;
+        }
         streamAbort.current = null;
         // Ensure the run settles to "done" even if the SSE tail (run.completed
         // with usage/runtime) was dropped through the proxy chain — the footer
@@ -1119,6 +1190,12 @@ export default function ChatPage() {
             // Persist the last run's stats so the permanent footer keeps showing
             // them after the run settles (idle state otherwise clears them).
             if (settled.stats) setLastStats(settled.stats);
+            // Module mirror: keep the settled chain/tools/stats across unmount.
+            if (sessionId) {
+              const m = getModuleLive(sessionId);
+              m.live = settled;
+              m.streamSession = null;
+            }
             return settled;
           });
         }
@@ -1175,7 +1252,12 @@ export default function ChatPage() {
   // frames then tails live). This reattaches on page return / tab focus /
   // device switch so the stream keeps flowing like Claude/ChatGPT — no
   // refresh needed, and a second device can join mid-run.
-  const lastSeqRef = useRef<Record<string, number>>({});
+  //
+  // These refs live at MODULE scope (below), not inside the component, so
+  // navigating away to another tab (which unmounts ChatPage) doesn't wipe
+  // the chain, tools, and seq state. Returning restores the run mid-flight
+  // exactly as it was — no rebuild, no refresh.
+  const lastSeqRef = useRef(lastSeqState);
   const reattachAbort = useRef<AbortController | null>(null);
 
   const reattachRun = useCallback(
@@ -1184,7 +1266,8 @@ export default function ChatPage() {
       // Don't double-attach if we're already streaming this session.
       if (streamSessionRef.current === sessionId && busyRef.current) return;
       try {
-        const res = await fetch(`/api/chat/sessions/${sessionId}/events?since=${lastSeqRef.current[sessionId] ?? 0}`, {
+        const m = getModuleLive(sessionId);
+        const res = await fetch(`/api/chat/sessions/${sessionId}/events?since=${lastSeqRef.current[sessionId] ?? m.lastSeq ?? 0}`, {
           cache: "no-store",
         });
         if (!res.ok || !res.body) return;
@@ -1217,12 +1300,14 @@ export default function ChatPage() {
             }
             if (!payload.event) payload = { ...payload, event };
             lastSeqRef.current[sessionId] = payload.seq ?? lastSeqRef.current[sessionId] ?? 0;
+            m.lastSeq = lastSeqRef.current[sessionId];
             // First real event → now we know the run is live; restore the
             // pre-existing state and go busy.
             if (!livePhase) {
               livePhase = true;
               setBusy(true);
-              const prev = liveBySessionRef.current[sessionId]?.live;
+              m.busy = true;
+              const prev = liveBySessionRef.current[sessionId]?.live ?? m.live;
               if (prev && prev.phase !== "idle" && prev.phase !== "done") {
                 setLive(prev);
               } else {
@@ -1230,18 +1315,19 @@ export default function ChatPage() {
               }
             }
             if (payload.event === "run.started" || payload.event === "message.started") {
-              setLive((p) => ({ ...p, phase: "thinking" }));
-            } else if (payload.event === "assistant.delta") {
-              livePhase = true;
               setLive((p) => {
-                const next = { ...p, phase: "streaming" as const, stats: p.stats ?? null };
-                const prevText = liveBySessionRef.current[sessionId]?.streamedText ?? "";
-                const text = prevText + (payload.delta ?? "");
-                // Keep a local accumulation via functional state snapshot.
-                liveBySessionRef.current[sessionId] = { live: next, streamedText: text };
+                const next = { ...p, phase: "thinking" as const };
+                m.live = next;
                 return next;
               });
-              setStreamedText((t) => t + (payload.delta ?? ""));
+            } else if (payload.event === "assistant.delta") {
+              livePhase = true;
+              const prevText = liveBySessionRef.current[sessionId]?.streamedText ?? m.streamedText ?? "";
+              const text = prevText + (payload.delta ?? "");
+              m.streamedText = text;
+              liveBySessionRef.current[sessionId] = { live: { ...m.live, phase: "streaming" as const }, streamedText: text };
+              setLive({ ...m.live, phase: "streaming" });
+              setStreamedText(text);
             } else if (payload.event === "tool.started" || payload.event === "tool.progress") {
               livePhase = true;
               const tname = payload.tool_name ?? "tool";
@@ -1256,7 +1342,8 @@ export default function ChatPage() {
                       reasoning: p.reasoning + delta,
                       chain: appendReasoningToChain(p.chain, delta),
                     };
-                    liveBySessionRef.current[sessionId] = { live: next, streamedText: liveBySessionRef.current[sessionId]?.streamedText ?? "" };
+                    m.live = next;
+                    liveBySessionRef.current[sessionId] = { live: next, streamedText: m.streamedText };
                     return next;
                   });
                 }
@@ -1280,7 +1367,8 @@ export default function ChatPage() {
                   toolCount: tools.length,
                   chain: chainHas ? p.chain : [...p.chain, { kind: "tool" as const, tool: te }],
                 };
-                liveBySessionRef.current[sessionId] = { live: next, streamedText: liveBySessionRef.current[sessionId]?.streamedText ?? "" };
+                m.live = next;
+                liveBySessionRef.current[sessionId] = { live: next, streamedText: m.streamedText };
                 return next;
               });
             } else if (payload.event === "tool.completed" || payload.event === "tool.failed") {
@@ -1299,16 +1387,19 @@ export default function ChatPage() {
                     : c
                 );
                 const next = { ...p, tools, chain, failedCount: p.failedCount + (isErr ? 1 : 0) };
-                liveBySessionRef.current[sessionId] = { live: next, streamedText: liveBySessionRef.current[sessionId]?.streamedText ?? "" };
+                m.live = next;
+                liveBySessionRef.current[sessionId] = { live: next, streamedText: m.streamedText };
                 return next;
               });
             } else if (payload.event === "assistant.completed") {
               const content = payload.content ?? "";
               if (content) {
                 setStreamedText(content);
-                liveBySessionRef.current[sessionId] = { live: { ...liveBySessionRef.current[sessionId]?.live ?? ({} as LiveState), phase: "streaming" }, streamedText: content };
-                setMessages((m) => {
-                  const copy = [...m];
+                m.streamedText = content;
+                m.live = { ...m.live, phase: "streaming" };
+                liveBySessionRef.current[sessionId] = { live: m.live, streamedText: content };
+                setMessages((prev) => {
+                  const copy = [...prev];
                   const last = copy[copy.length - 1];
                   if (last?.role === "assistant") {
                     copy[copy.length - 1] = { ...last, content };
@@ -1335,7 +1426,10 @@ export default function ChatPage() {
                     runtime: payload.runtime ?? null,
                   },
                 };
-                liveBySessionRef.current[sessionId] = { live: next, streamedText: liveBySessionRef.current[sessionId]?.streamedText ?? "" };
+                m.live = next;
+                m.busy = false;
+                m.streamSession = null;
+                liveBySessionRef.current[sessionId] = { live: next, streamedText: m.streamedText };
                 return next;
               });
               setLastStats((prev) => ({ ...(prev ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), ...(payload.usage ? { usage: payload.usage, runtime: payload.runtime } : {}) }));
@@ -1346,6 +1440,8 @@ export default function ChatPage() {
                 setError(payload.error ?? payload.message ?? "Stream error");
               }
               setBusy(false);
+              m.busy = false;
+              m.streamSession = null;
               streamSessionRef.current = null;
               livePhase = false;
             }
@@ -1356,17 +1452,20 @@ export default function ChatPage() {
         // way release the attach marker so future reattaches aren't blocked.
         if (livePhase) {
           setBusy(false);
+          m.busy = false;
           await loadMessages(sessionId);
         } else if (busyRef.current && streamSessionRef.current === sessionId) {
           // The run finished before we reattached; a stale busy from the
           // original send may still be set — clear it so the UI never stays
           // stuck on "loading".
           setBusy(false);
+          m.busy = false;
           // Reconcile the messages from the server so any final answer that
           // landed while we were away shows up.
           await loadMessages(sessionId).catch(() => {});
         }
         streamSessionRef.current = null;
+        m.streamSession = null;
       } catch {
         // Aborted (new send started) or transient — the 15s session poll
         // will re-trigger reattach if the run is still live.
@@ -1661,13 +1760,26 @@ export default function ChatPage() {
     // run moves from thinking to tools to streaming.
     const chainSegments = live.chain.length > 0 ? live.chain : live.reasoning ? [{ kind: "reasoning" as const, text: live.reasoning }] : [];
 
+    // Inline view caps at the most recent 3 TOOL segments (keeping the
+    // reasoning that leads into them); the fullscreen chain shows everything
+    // in order. Cap by finding the index of the 3rd-last tool segment.
+    let inlineSegments = chainSegments;
+    if (chainSegments.length > 4) {
+      const toolIdx = chainSegments
+        .map((s, i) => (s.kind === "tool" ? i : -1))
+        .filter((i) => i >= 0);
+      if (toolIdx.length > 3) {
+        inlineSegments = chainSegments.slice(toolIdx[toolIdx.length - 3]);
+      }
+    }
+
     return (
       <div className="flex justify-start">
         <div className="max-w-[88%] min-w-0 rounded-2xl border px-4 py-2.5 text-sm" style={{ borderColor: "var(--card-border)", background: "color-mix(in srgb, var(--bg) 60%, transparent)", color: "var(--text)" }}>
           {usingBrowser && <BrowserView />}
-          {chainSegments.length > 0 && (
+          {inlineSegments.length > 0 && (
             <div className="mb-2 space-y-2">
-              {chainSegments.map((seg, i) =>
+              {inlineSegments.map((seg, i) =>
                 seg.kind === "reasoning" ? (
                   settings.reasoning !== "hidden" ? (
                   <div
@@ -1695,14 +1807,14 @@ export default function ChatPage() {
                   </div>
                 )
               )}
-              {live.tools.length > 3 && (
+              {chainSegments.length > 0 && (
                 <button
                   onClick={() => setChainOpen(true)}
                   className="flex w-full items-center justify-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[10px] font-semibold"
                   style={{ borderColor: "var(--card-border)", color: "var(--text-faint)" }}
                 >
                   <Maximize2 className="h-3 w-3" />
-                  View all {live.tools.length} tool calls
+                  View full chain ({live.tools.length} tool call{live.tools.length === 1 ? "" : "s"})
                 </button>
               )}
             </div>
@@ -2071,12 +2183,12 @@ export default function ChatPage() {
             />
 
             {/* Composer — expanded: fills the chat container (not the viewport).
-                Uses the same translucent + blur overlay style as the
-                conversations sidebar, not a heavy solid card. */}
+                Solid overlay matching the conversations sidebar so text is
+                readable and never shows the busy stream behind it. */}
             {composerExpanded && (
               <div
                 className="absolute inset-0 z-20 flex flex-col"
-                style={{ background: "color-mix(in srgb, var(--bg-2) 97%, transparent)", backdropFilter: "blur(2px)", borderColor: "var(--card-border)" }}
+                style={{ background: "var(--bg-2)", borderColor: "var(--card-border)" }}
               >
                 <div className="flex items-center justify-between border-b px-4 py-2" style={{ borderColor: "var(--card-border)" }}>
                   <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>

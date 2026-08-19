@@ -200,7 +200,7 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 - [x] Dev workspace: VERCEL_TOKEN swapped from device-bound CLI token (vca_) to personal API token (vcp_) — killed the 403 invalidToken on /dev
 - [x] Chat: finished attach-files-in-chat (resumed interrupted run — bridge endpoint, proxy route with STATE_BRIDGE_TOKEN, Composer picker, send() upload)
 - [x] Chat footer: context % now shows real current context (last run input) not lifetime cumulative — no more permanent "compaction imminent" on compressed sessions
-- [x] A32 arm setup: SSH key `hermes-arm` regenerated + `~/.ssh/config` entry (Host a32) — phone setup pending (Termux + Tailscale online)
+- [x] Phone arm (A32 SSH) — dropped per Akhil's call: not needed, PWA covers the functionality. Keys/config removed.
 
 ---
 
