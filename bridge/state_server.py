@@ -120,6 +120,19 @@ def load_sessions(limit: int = 25, source: str | None = None) -> list[dict]:
             "ORDER BY started_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
+    elif source == "all":
+        # "All" = every CONVERSATION source (dashboard, subagent, cli, api_server,
+        # tui, discord). Cron runs are explicitly excluded — there are ~19k of
+        # them and they drown real chats out of the top-N (they're on the Crons
+        # page where they belong). Without this the two real conversations
+        # vanish from the ALL tab because 19,408 cron rows sit ahead of them.
+        rows = con.execute(
+            "SELECT id, source, title, started_at, ended_at, end_reason, message_count, tool_call_count, "
+            "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, api_call_count "
+            "FROM sessions WHERE source != 'cron' "
+            "ORDER BY started_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
     else:
         rows = con.execute(
             "SELECT id, source, title, started_at, ended_at, end_reason, message_count, tool_call_count, "
