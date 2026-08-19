@@ -2,11 +2,16 @@
 # Hermes OS v2 — auth + bridge security test suite.
 # Verifies: unauthenticated rejection, PIN auth, session gating,
 # rate limiting, bridge token accept/reject, security headers.
-# Usage: ./scripts/auth-test.sh [BASE_URL]
+# Usage: AUTH_PIN=123456 ./scripts/auth-test.sh [BASE_URL]
 # Default BASE_URL = https://hermes-mission-control-v2.vercel.app
 set -u
 
 BASE="${1:-https://hermes-mission-control-v2.vercel.app}"
+PIN="${AUTH_PIN:-}"
+if [ -z "$PIN" ]; then
+  echo "AUTH_PIN env var required — run: AUTH_PIN=<your pin> ./scripts/auth-test.sh"
+  exit 1
+fi
 JAR="$(mktemp)"
 PASS=0
 FAIL=0
@@ -35,7 +40,7 @@ CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: applicat
 check "wrong PIN → 401" 401 "$CODE"
 
 # 3. Correct PIN accepted + session cookie
-CODE=$(curl -s -c "$JAR" -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" -d '{"pin":"REDACTED"}' "$BASE/api/auth/verify")
+CODE=$(curl -s -c "$JAR" -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" -d "{\"pin\":\"$PIN\"}" "$BASE/api/auth/verify")
 check "correct PIN → 200" 200 "$CODE"
 
 # 4. Authenticated API works
