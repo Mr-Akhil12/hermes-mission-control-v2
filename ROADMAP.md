@@ -179,10 +179,11 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 
 ### Fri Aug 21 — Make the stubs real
 - [x] GitHub PAT rotated (old one auto-revoked — 401 confirmed; new token in `.env` + Bitwarden SM + Vercel env, never in git/client)
-- [~] `/dev` real: project workspace — Vercel deployments (23 projects) + GitHub repos (28) merged, select-into-project, file tree, commits, deployments, project-bound chat window — kills the 30/100
-- [ ] `/agents` live: real agent state from the Hermes API (sessions, model, status) — kills the 15/100
-- [ ] `/sessions` Resume button wired + `/crons` Output link fixed
-- [ ] Mobile pass on `/native` (relax fixed heights for small phones)
+- [x] `/dev` real: project workspace — 50 projects (23 Vercel + 28 GitHub merged), select-into-project, file tree, commits, deployments, project-bound chat window — kills the 30/100
+- [x] `/agents` live: real agent state from `/api/chat/sessions` (stats row, per-agent status, activity feed) — kills the 15/100
+- [x] `/sessions` Resume button wired → `/chat?resume=<id>` (loads source=all so cron/subagent sessions resolve)
+- [x] `/crons` Output self-link removed (runs carry no session_id — Thinking button covers it)
+- [x] Mobile pass on `/native` (min-h 480px → 60vh, w-full max-w)
 
 ### Sat Aug 22 — Clone-ready polish + ship
 - [ ] Dead buttons cleanup (studio/channels/approvals), offline SW fetch handler
