@@ -178,8 +178,9 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 - [x] Chat god-file extraction: `useSessions` hook wired into page (session list −27 lines), `useStreamState` hook prepped for next step (send()/SSE move-out is future work)
 
 ### Fri Aug 21 — Make the stubs real
+- [x] GitHub PAT rotated (old one auto-revoked — 401 confirmed; new token in `.env` + Bitwarden SM + Vercel env, never in git/client)
+- [~] `/dev` real: project workspace — Vercel deployments (23 projects) + GitHub repos (28) merged, select-into-project, file tree, commits, deployments, project-bound chat window — kills the 30/100
 - [ ] `/agents` live: real agent state from the Hermes API (sessions, model, status) — kills the 15/100
-- [ ] `/dev` real: wire `/api/artifacts` (5-min fix, biggest bang) + git status via GitHub API + deployments via Vercel REST API — kills the 30/100
 - [ ] `/sessions` Resume button wired + `/crons` Output link fixed
 - [ ] Mobile pass on `/native` (relax fixed heights for small phones)
 
