@@ -5,7 +5,8 @@ import {
   Send, Mic, MicOff, Volume2, MessageSquare, Plus, ChevronLeft, ChevronRight,
   Loader2, Trash2, Pencil, Square, CheckSquare, X, Maximize2, Minimize2,
 } from "lucide-react";
-import type { ChatMsg, ChatSettings, SessionMeta, StreamEvent, ToolEvent, ChainSegment, RunStats, ToolCallInfo } from "@/lib/chat-types";
+import type { ChatMsg, ChatSettings, StreamEvent, ToolEvent, ChainSegment, RunStats, ToolCallInfo } from "@/lib/chat-types";
+import { useSessions } from "@/lib/use-sessions";
 import { MessageBubble, MarkdownLite } from "@/components/chat/MessageBubble";
 import { ChatSettingsButton, DEFAULT_SETTINGS, loadSettings } from "@/components/chat/ChatSettings";
 import { Composer } from "@/components/chat/Composer";
@@ -60,10 +61,18 @@ function appendReasoningToChain(chain: ChainSegment[], delta: string): ChainSegm
 }
 
 export default function ChatPage() {
-  const [sessions, setSessions] = useState<SessionMeta[]>([]);
-  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const {
+    sessions,
+    sessionsLoading,
+    setSessionsLoading,
+    activeId,
+    setActiveId,
+    sessionFilter,
+    setSessionFilter,
+    loadSessions,
+  } = useSessions({ setError });
   const [messagesLoading, setMessagesLoading] = useState(false);
-  const [activeId, setActiveId] = useState<string | null>(null);
   // Live mirror of the currently-viewed session so the send() finally block
   // can tell whether the user navigated away mid-run (the closure's activeId
   // goes stale).
@@ -74,9 +83,7 @@ export default function ChatPage() {
   const [busy, setBusy] = useState(false);
   const [listening, setListening] = useState(false);
   const [voiceOn, setVoiceOn] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [sessionFilter, setSessionFilter] = useState<"chats" | "all">("chats");
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
@@ -118,23 +125,6 @@ export default function ChatPage() {
   useEffect(() => {
     if (activeId) setInput(draftsRef.current[activeId] ?? "");
   }, [activeId]);
-
-  const loadSessions = useCallback(async (source?: "chats" | "all") => {
-    try {
-      const src = source ?? sessionFilter;
-      const qs = src === "all" ? "?source=all" : "?source=dashboard";
-      const res = await fetch(`/api/chat/sessions${qs}`, { cache: "no-store" });
-      const data = await res.json();
-      const list: SessionMeta[] = data?.data ?? data?.sessions ?? [];
-      setSessions(list);
-      return list;
-    } catch (e) {
-      setError(`Failed to load conversations: ${e instanceof Error ? e.message : e}`);
-      return [];
-    } finally {
-      setSessionsLoading(false);
-    }
-  }, [sessionFilter]);
 
   const loadMessages = useCallback(async (id: string) => {
     setMessagesLoading(true);

@@ -172,10 +172,10 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 - [x] Verify every existing flow still works through the new auth (chat, approvals, push, dispatch)
 
 ### Thu Aug 20 — Security completion + chat fixes
-- [ ] Tests: unauthenticated rejection, authenticated access, bridge token accept/reject
-- [ ] Fix the two 404s: add `/api/chat/sessions/{id}/fork` + `/model` routes (slash commands start working)
-- [ ] Config normalization: single source for `deepseek-v4-flash:0731`, reconcile `.env.example`
-- [ ] Start chat god-file extraction (session state → hook, stream state → hook)
+- [x] Tests: `scripts/auth-test.sh` — 12 checks (unauthenticated rejection, PIN accept/reject, authenticated access, rate limit 429, security headers), all passing against live
+- [x] Fix the two 404s: `/api/chat/sessions/{id}/fork` + `/model` routes added (slash commands live-verified: fork created session, model lock accepted)
+- [x] Config normalization: `src/lib/models.ts` single source for `deepseek-v4-flash:0731`, `.env.example` reconciled (added `NEXT_PUBLIC_FUNNEL_URL`)
+- [~] Start chat god-file extraction (session state → `useSessions` hook, stream state → `useStreamState` hook)
 
 ### Fri Aug 21 — Make the stubs real
 - [ ] `/agents` live: real agent state from the Hermes API (sessions, model, status) — kills the 15/100
