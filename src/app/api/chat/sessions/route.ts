@@ -7,8 +7,11 @@ import { bridgeFetch } from "@/lib/bridge";
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-    const limit = searchParams.get("limit") ?? "50";
+    // source=all must look deep enough that real (older) conversations aren't
+    // buried below the constant cron/subagent flood — cron runs every few
+    // minutes, so a 50-cap hides dashboard chats started yesterday.
     const source = searchParams.get("source") ?? "dashboard";
+    const limit = searchParams.get("limit") ?? (source === "all" ? "200" : "50");
     const resp = await bridgeFetch(`/api/sessions?limit=${limit}&source=${source}`, {
       cache: "no-store",
     });
