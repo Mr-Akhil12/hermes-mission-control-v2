@@ -201,6 +201,11 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 - [x] Chat: finished attach-files-in-chat (resumed interrupted run — bridge endpoint, proxy route with STATE_BRIDGE_TOKEN, Composer picker, send() upload)
 - [x] Chat footer: context % now shows real current context (last run input) not lifetime cumulative — no more permanent "compaction imminent" on compressed sessions
 - [x] Phone arm (A32 SSH) — dropped per Akhil's call: not needed, PWA covers the functionality. Keys/config removed.
+- [x] Chat survives tab switches — module-scoped stream store (chain/tools/streamedText/seq survive ChatPage unmount); returning restores mid-flight instead of the broken "tool calls disappeared" state
+- [x] Fullscreen composer — solid `var(--bg-2)` overlay (was translucent over the busy stream)
+- [x] Inline live view caps to 3 most recent tool calls; "View full chain" always available (ordered reasoning→tool→reasoning→answer)
+- [x] Sessions ALL tab — 19k cron rows were drowning real conversations; `source=all` now excludes cron. The 861-msg + 40-msg conversations are visible again
+- [x] Steer/slash commands verified live through the command bridge (version returns, steer routes to the active session)
 
 ---
 
