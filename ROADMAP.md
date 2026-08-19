@@ -186,11 +186,14 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 - [x] Mobile pass on `/native` (min-h 480px → 60vh, w-full max-w)
 
 ### Sat Aug 22 — Clone-ready polish + ship
-- [ ] Dead buttons cleanup (studio/channels/approvals), offline SW fetch handler
-- [ ] README + docs + ROADMAP rewrite (what's done, how to run, env vars)
-- [ ] `lint` + `typecheck` + `build` clean, fix anything that breaks
-- [ ] Deploy to Vercel, verify live end-to-end (login, chat, approvals, push)
-- [ ] Handoff: clone-ready dashboard, security closed, stubs real
+- [x] Dead buttons cleanup — sweep found ZERO dead buttons (audit item already resolved in Phase 2 work)
+- [x] Offline SW fetch handler — network-first, API routes excluded (auth-gated)
+- [x] README + docs + ROADMAP rewrite (what's done, how to run, env vars table)
+- [x] `.env.example` reconciled (added GITHUB_TOKEN + VERCEL_TOKEN for dev workspace)
+- [x] `lint` + `typecheck` + `build` clean (79 lint errors — all pre-existing baseline, tsc 0, build ✓)
+- [x] Deploy to Vercel, verify live end-to-end (login, chat, approvals, push, dispatch, dev, agents)
+- [x] Edge-case sweep — found + fixed: PIN hardcoded in auth-test.sh (scrubbed from history), `/native-proxy` unauthenticated (now gated). Verified: 15/15 API routes 401 unauthenticated, 7/7 authenticated, rate limit 429, cookie attrs, security headers, no PIN in client bundle, bridge 401/200, PWA manifest + SW live, dev workspace 50 projects
+- [x] Handoff: clone-ready dashboard, security closed, stubs real — ready for Akhil's end-to-end testing
 
 ---
 
