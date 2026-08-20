@@ -10,7 +10,13 @@ import { ToolCallStack } from "./ToolCalls";
 import { ChainView } from "./ChainView";
 
 /** Tiny markdown renderer: **bold**, `code`, ```fences```, *italic*, links. */
-export const MarkdownLite = memo(function MarkdownLite({ text }: { text: string }) {
+export const MarkdownLite = memo(function MarkdownLite({
+  text,
+  tone = "assistant",
+}: {
+  text: string;
+  tone?: "user" | "assistant";
+}) {
   const parts = text.split(/(```[\s\S]*?```|`[^`\n]+`|\*\*[^*]+\*\*|\*[^*\n]+\*|\[[^\]]+\]\([^)]+\))/g);
 
   return (
@@ -24,8 +30,8 @@ export const MarkdownLite = memo(function MarkdownLite({ text }: { text: string 
               className="my-1.5 overflow-x-auto rounded-lg border p-2 text-xs leading-relaxed"
               style={{
                 borderColor: "var(--card-border)",
-                background: "color-mix(in srgb, var(--bg) 70%, transparent)",
-                color: "var(--text-dim)",
+                background: tone === "user" ? "rgba(0,0,0,0.22)" : "color-mix(in srgb, var(--bg) 70%, transparent)",
+                color: tone === "user" ? "rgba(255,255,255,0.95)" : "var(--text-dim)",
               }}
             >
               <code>{code}</code>
@@ -37,7 +43,10 @@ export const MarkdownLite = memo(function MarkdownLite({ text }: { text: string 
             <code
               key={i}
               className="rounded px-1 py-0.5 text-[0.9em]"
-              style={{ background: "rgba(124,108,255,0.10)", color: "var(--accent-2)" }}
+              style={{
+                background: tone === "user" ? "rgba(255,255,255,0.18)" : "rgba(124,108,255,0.10)",
+                color: tone === "user" ? "rgba(255,255,255,0.95)" : "var(--accent-2)",
+              }}
             >
               {part.slice(1, -1)}
             </code>
@@ -62,7 +71,7 @@ export const MarkdownLite = memo(function MarkdownLite({ text }: { text: string 
               target="_blank"
               rel="noopener noreferrer"
               className="underline underline-offset-2"
-              style={{ color: "var(--accent-2)" }}
+              style={{ color: tone === "user" ? "rgba(255,255,255,0.95)" : "var(--accent-2)" }}
             >
               {link[1]}
             </a>
@@ -192,7 +201,7 @@ export const MessageBubble = memo(function MessageBubble({
           </div>
         )}
         <div className="whitespace-pre-wrap break-words">
-          <MarkdownLite text={msg.content} />
+          <MarkdownLite text={msg.content} tone={isUser ? "user" : "assistant"} />
         </div>
         {!isUser && msg.stats && (msg.stats.model || msg.stats.tokens !== undefined) && (
           <div
