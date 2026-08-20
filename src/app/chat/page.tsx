@@ -2305,10 +2305,13 @@ export default function ChatPage() {
                     ) : (
                       <Loader2 className="h-3 w-3 animate-spin" style={{ color: "var(--accent)" }} />
                     )}
-                    <span className="truncate">{seg.tool.name.replace(/_/g, " ")}{seg.tool.preview ? ` — ${seg.tool.preview.slice(0, 80)}` : ""}</span>
-                    {seg.tool.durationMs !== undefined && (
-                      <span className="ml-auto font-mono text-[10px] opacity-70">{(seg.tool.durationMs / 1000).toFixed(1)}s</span>
-                    )}
+                    <span className="truncate">{seg.tool.name.replace(/_/g, " ")}</span>
+                    <span className="ml-auto shrink-0 font-mono text-[10px] opacity-70">
+                      {seg.tool.durationMs !== undefined
+                        ? (seg.tool.durationMs / 1000).toFixed(1)
+                        : Math.max(0, (Date.now() - (seg.tool.startedAt ?? Date.now())) / 1000).toFixed(1)}
+                      s
+                    </span>
                   </div>
                 )
               )}
