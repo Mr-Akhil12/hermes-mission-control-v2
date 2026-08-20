@@ -92,6 +92,23 @@ function appendReasoningToChain(chain: ChainSegment[], delta: string): ChainSegm
   return [...chain, { kind: "reasoning", text: delta }];
 }
 
+// Settle a live snapshot once a run is confirmed finished: every tool with
+// no duration (still showing the spinner) gets a completion time, and the
+// phase flips to "done" so returning to the chat NEVER shows infinite
+// loading tools. The ordered chain is preserved (tools marked completed).
+function settleLiveState(live: LiveState): LiveState {
+  const now = Date.now();
+  const tools = live.tools.map((t) =>
+    t.durationMs === undefined ? { ...t, durationMs: now - t.startedAt, error: t.error ?? false } : t
+  );
+  const chain = live.chain.map((c) =>
+    c.kind === "tool" && c.tool.durationMs === undefined
+      ? { ...c, tool: { ...c.tool, durationMs: now - c.tool.startedAt, error: c.tool.error ?? false } }
+      : c
+  );
+  return { ...live, tools, chain, phase: "done" };
+}
+
 export default function ChatPage() {
   const [error, setError] = useState<string | null>(null);
   const {
@@ -164,16 +181,15 @@ export default function ChatPage() {
   // Restore the module-scoped live stream state when remounting this page
   // (after navigating to another tab). If the run is still going, reattach
   // picks up from the saved seq; if it finished, we show the settled state.
+  // NOTE: busy is intentionally NOT restored blindly — a stale `true` from a
+  // finished run would block the reattach settle below and leave the tools
+  // spinning forever. reattachRun() re-establishes busy only when the events
+  // stream proves the run is actually live.
   useEffect(() => {
     if (!activeId) return;
     const saved = moduleLive[activeId];
     if (saved) {
-      if (saved.live.phase !== "idle" && saved.live.phase !== "done") {
-        setLive(saved.live);
-        setStreamedText(saved.streamedText);
-        setBusy(saved.busy);
-        setLastStats(saved.live.stats);
-      } else if (saved.live.phase === "done") {
+      if (saved.live.phase !== "idle") {
         setLive(saved.live);
         setStreamedText(saved.streamedText);
         setLastStats(saved.live.stats);
@@ -265,12 +281,32 @@ export default function ChatPage() {
             pending.content += (pending.content && msg.content ? "\n\n" : "") + msg.content;
             if (msg.reasoning) {
               pending.reasoning = pending.reasoning ? `${pending.reasoning}\n${msg.reasoning}` : msg.reasoning;
+              // Preserve the ORDERED turn structure: append a reasoning
+              // segment so history renders reasoning → tool → reasoning →
+              // tool → answer exactly like the live chain.
+              pending.segments = [
+                ...(pending.segments ?? []),
+                { kind: "reasoning" as const, text: msg.reasoning },
+              ];
             }
             if (msg.toolCalls?.length) {
               pending.toolCalls = [...(pending.toolCalls ?? []), ...msg.toolCalls];
+              pending.segments = [
+                ...(pending.segments ?? []),
+                { kind: "tools" as const, calls: msg.toolCalls },
+              ];
             }
           } else {
-            pending = { ...msg };
+            pending = {
+              ...msg,
+              segments:
+                msg.reasoning || msg.toolCalls?.length
+                  ? [
+                      ...(msg.reasoning ? [{ kind: "reasoning" as const, text: msg.reasoning }] : []),
+                      ...(msg.toolCalls?.length ? [{ kind: "tools" as const, calls: msg.toolCalls }] : []),
+                    ]
+                  : undefined,
+            };
           }
         } else {
           if (pending) {
@@ -970,6 +1006,13 @@ export default function ChatPage() {
             } catch {
               continue;
             }
+            // Record the seq cursor so reattach (after leaving/returning)
+            // replays only what was missed — never the whole run from 0.
+            const pseq = (payload as any).seq;
+            if (typeof pseq === "number" && sessionId) {
+              lastSeqState[sessionId] = pseq;
+              getModuleLive(sessionId).lastSeq = pseq;
+            }
             // The Hermes API puts the event type in the SSE `event:` line; the
             // data payload does NOT carry an `event` field. Normalize so the
             // switch below matches on the real event type — without this every
@@ -1515,12 +1558,33 @@ export default function ChatPage() {
             m.live = next;
             return next;
           });
-        } else if (busyRef.current && streamSessionRef.current === sessionId) {
-          // The run finished before we reattached; a stale busy from the
-          // original send may still be set — clear it so the UI never stays
-          // stuck on "loading".
+        } else {
+          // Run finished (or rotated) before we reattached — no live frames
+          // came back. The module snapshot may still hold un-settled
+          // (spinning) tools from the interrupted stream: settle them now so
+          // returning NEVER shows "loading forever". Also clear any stale
+          // busy flag and reconcile the final answer from the server.
           setBusy(false);
           m.busy = false;
+          const now = Date.now();
+          setLive((p) => {
+            const stillPending = p.tools.some((t) => t.durationMs === undefined);
+            if (!stillPending && p.phase === "done") return p;
+            const tools = p.tools.map((t) =>
+              t.durationMs === undefined
+                ? { ...t, durationMs: Math.max(1, now - (t.startedAt ?? now)), error: t.error ?? false }
+                : t
+            );
+            const chain = p.chain.map((c) =>
+              c.kind === "tool" && c.tool.durationMs === undefined
+                ? { ...c, tool: { ...c.tool, durationMs: Math.max(1, now - (c.tool.startedAt ?? now)), error: c.tool.error ?? false } }
+                : c
+            );
+            const next = { ...p, tools, chain, phase: "done" as const };
+            m.live = next;
+            liveBySessionRef.current[sessionId] = { live: next, streamedText: m.streamedText };
+            return next;
+          });
           // Reconcile the messages from the server so any final answer that
           // landed while we were away shows up.
           await loadMessages(sessionId).catch(() => {});
@@ -1543,7 +1607,11 @@ export default function ChatPage() {
   const visibilityHandler = useCallback(() => {
     if (document.visibilityState === "visible" && activeId) {
       const sess = sessions.find((s) => s.id === activeId);
-      if (sess?.is_active && streamSessionRef.current !== activeId) {
+      const snap = moduleLive[activeId];
+      const snapActive = snap && snap.live.phase !== "idle" && snap.live.phase !== "done";
+      // Reattach if the session is live OR its snapshot is still un-settled —
+      // the latter catches finished runs whose tools never got settled.
+      if ((sess?.is_active || snapActive) && streamSessionRef.current !== activeId) {
         void reattachRun(activeId);
       }
     }
@@ -1559,13 +1627,20 @@ export default function ChatPage() {
   }, [visibilityHandler]);
 
   // On mount and whenever the active session changes, reattach if it's live.
+  // Also reattach when the MODULE snapshot is mid-flight (phase !== idle/done):
+  // the session list may report is_active=false right after a run finishes
+  // server-side, but the snapshot's tools are still un-settled — reattach
+  // replays the tail and settles them (never infinite spinners).
   useEffect(() => {
     if (activeId) {
       const sess = sessions.find((s) => s.id === activeId);
-      if (sess?.is_active && !busyRef.current) {
+      const snap = moduleLive[activeId];
+      const snapActive = snap && snap.live.phase !== "idle" && snap.live.phase !== "done";
+      if ((sess?.is_active || snapActive) && !busyRef.current) {
         void reattachRun(activeId);
       }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, sessions, reattachRun]);
 
   const toggleMic = useCallback(() => {
@@ -1687,9 +1762,13 @@ export default function ChatPage() {
     }
     // Await the load so the sidebar doesn't briefly show the wrong conversation.
     void loadMessages(id);
-    // If the session we switched INTO is live, reattach to its stream.
+    // If the session we switched INTO is live — OR its module snapshot is
+    // still un-settled (mid-flight or finished-without-settle) — reattach so
+    // the run either continues or settles cleanly (never infinite spinners).
     const sess = sessions.find((s) => s.id === id);
-    if (sess?.is_active || liveBySessionRef.current[id]) {
+    const snap = moduleLive[id];
+    const snapActive = snap && snap.live.phase !== "idle" && snap.live.phase !== "done";
+    if (sess?.is_active || snapActive || liveBySessionRef.current[id]) {
       void reattachRun(id);
     }
     // On mobile the sidebar fills the whole view — close it after picking
@@ -1931,11 +2010,15 @@ export default function ChatPage() {
 
       <div className="card relative flex min-h-0 flex-1 flex-col overflow-hidden">
         <div className="flex min-h-0 flex-1">
-          {/* Conversation sidebar — slides in as a full-height overlay */}
+          {/* Conversation sidebar — mobile: slides in as a full-height overlay;
+              desktop (md+): an IN-FLOW collapsible column (~30% width, capped)
+              like ChatGPT — the chat cell shrinks to the remaining width
+              instead of being covered. */}
           <div
-            className={`${sidebarOpen ? "translate-x-0" : "-translate-x-full"} w-full transition-transform duration-200 ease-out md:w-56`}
+            className={`absolute md:relative ${sidebarOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"} w-full transition-all duration-200 ease-out ${
+              sidebarOpen ? "md:w-[30%] md:max-w-[300px] md:min-w-[220px]" : "md:w-0 md:max-w-0 md:overflow-hidden"
+            } ${sidebarOpen ? "" : "md:hidden"}`}
             style={{
-              position: "absolute",
               top: 0,
               left: 0,
               height: "100%",

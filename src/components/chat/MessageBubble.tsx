@@ -143,6 +143,9 @@ export const MessageBubble = memo(function MessageBubble({
   // History bubbles carry reconstructed toolCalls (from the persisted store);
   // live bubbles carry ToolEvent[] via `tools`. Show whichever exists.
   const hasChain = !isUser && (msg.toolCalls?.length || (tools && tools.length > 0));
+  // Ordered history structure: reasoning and tool calls interleaved as they
+  // happened — renders like the live chain, never a flattened blob.
+  const hasSegments = !isUser && !!msg.segments && msg.segments.length > 0;
 
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
@@ -154,10 +157,31 @@ export const MessageBubble = memo(function MessageBubble({
             : { background: "color-mix(in srgb, var(--bg) 60%, transparent)", color: "var(--text)", border: "1px solid var(--card-border)" }
         }
       >
-        {!isUser && msg.reasoning && (
+        {!isUser && hasSegments && (
+          <div className="mb-2 space-y-2">
+            {msg.segments!.map((seg, i) =>
+              seg.kind === "reasoning" ? (
+                settings.reasoning !== "hidden" ? (
+                  <div
+                    key={`r-${i}`}
+                    className="whitespace-pre-wrap rounded-lg border-l-2 px-2.5 py-1.5 text-xs leading-relaxed"
+                    style={{ borderLeftColor: "var(--accent)", background: "rgba(124,108,255,0.06)", color: "var(--text-dim)", maxHeight: 240, overflowY: "auto" }}
+                  >
+                    {settings.reasoning === "partial" && seg.text.length > 900 ? seg.text.slice(-900) : seg.text}
+                  </div>
+                ) : null
+              ) : (
+                <div key={`t-${i}`}>
+                  <HistoryToolCalls calls={seg.calls} mode={settings.tools} />
+                </div>
+              )
+            )}
+          </div>
+        )}
+        {!isUser && !hasSegments && msg.reasoning && (
           <ReasoningBlock text={msg.reasoning} mode={settings.reasoning} />
         )}
-        {!isUser && msg.toolCalls && msg.toolCalls.length > 0 && (
+        {!isUser && !hasSegments && msg.toolCalls && msg.toolCalls.length > 0 && (
           <div className="mb-2">
             <HistoryToolCalls calls={msg.toolCalls} mode={settings.tools} />
           </div>

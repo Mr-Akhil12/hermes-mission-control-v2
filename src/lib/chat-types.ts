@@ -14,7 +14,18 @@ export type ChatMsg = {
   // Populated from the persisted row's token_count + session model, and
   // from the live run's completed usage. Replaces the persistent footer bar.
   stats?: { model?: string; tokens?: number } | null;
+  // ORDERED turn segments for history: reasoning blocks and tool calls
+  // interleaved exactly as they happened (same structure as the live chain),
+  // so returning to a finished conversation renders like the live stream —
+  // reasoning → tool → reasoning → tool → answer — never a flattened blob.
+  segments?: ChatSegment[];
 };
+
+// One ordered segment of a persisted assistant turn — mirrors ChainSegment
+// but carries ToolCallInfo (with results) instead of live ToolEvent.
+export type ChatSegment =
+  | { kind: "reasoning"; text: string }
+  | { kind: "tools"; calls: ToolCallInfo[] };
 
 export type ToolCallInfo = {
   id?: string;
