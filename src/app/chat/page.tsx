@@ -1101,7 +1101,12 @@ export default function ChatPage() {
                   // Real tool activity: register the tool + phase.
                   const exists = toolEvents.find((t) => t.name === tname && t.durationMs === undefined);
                   if (!exists) {
-                    const te: ToolEvent = { name: tname, startedAt: Date.now() };
+                    const te: ToolEvent = {
+                      name: tname,
+                      startedAt: Date.now(),
+                      preview: (payload as any).preview ?? undefined,
+                      args: (payload as any).args !== undefined ? JSON.stringify((payload as any).args).slice(0, 2000) : undefined,
+                    };
                     toolEvents = [...toolEvents, te];
                     toolCount += 1;
                     chain = [...chain, { kind: "tool", tool: te }];
