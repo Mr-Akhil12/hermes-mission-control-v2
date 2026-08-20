@@ -251,6 +251,13 @@ export default function ChatPage() {
       // current one: one message per turn.
       const msgs: ChatMsg[] = [];
       let pending: ChatMsg | null = null;
+      // OR of interruption evidence across merged assistant rows (the
+      // persisted row's finish_reason is authoritative for "this turn was
+      // stopped"). A MISSING result row alone is NOT evidence of
+      // interruption — tool_call_id matching can fail for successfully
+      // completed tools (quoted/wrapped ids), so we must not mark those
+      // interrupted.
+      let pendingInterrupted = false;
       // Tool results keyed by tool_call_id so we can attach them to the
       // assistant's tool_calls and rebuild the full chain.
       const toolResults = new Map<string, { result: string; error: boolean }>();
@@ -291,11 +298,10 @@ export default function ChatPage() {
                   args: typeof fn?.arguments === "string" ? fn.arguments : JSON.stringify(fn?.arguments ?? {}),
                   result: res?.result,
                   error: res?.error,
-                  // No persisted result row = the call was cancelled or
-                  // interrupted (or persistence dropped it). Mark it so the
-                  // chip renders a muted "interrupted" state instead of a
-                  // forever-spinner or a fabricated success check.
-                  interrupted: res === undefined,
+                  // interrupted is stamped at flush time from REAL evidence
+                  // (finish_reason indicating the turn was stopped) — never
+                  // from a missing result row alone, because tool_call_id
+                  // matching can fail for successfully completed tools.
                 };
               });
             }
@@ -319,6 +325,20 @@ export default function ChatPage() {
               : null,
         };
         if (msg.role === "assistant") {
+          // REAL interruption evidence: the persisted row's finish_reason.
+          // "length", "stop", "tool_calls", "content_filter" are normal
+          // completions; anything indicating the turn was halted (or an
+          // explicit interrupted flag from the API) marks the turn stopped.
+          const fr = String(m.finish_reason ?? "").toLowerCase();
+          const rowInterrupted =
+            fr === "interrupted" ||
+            fr === "cancelled" ||
+            fr === "abort" ||
+            fr === "halted" ||
+            fr === "safety" ||
+            (m as any).interrupted === true ||
+            (m as any).is_interrupted === true;
+          if (rowInterrupted) pendingInterrupted = true;
           if (pending) {
             pending.content += (pending.content && msg.content ? "\n\n" : "") + msg.content;
             if (msg.reasoning) {
@@ -363,13 +383,39 @@ export default function ChatPage() {
           }
         } else {
           if (pending) {
+            // Stamp interrupted from REAL evidence only (finish_reason said
+            // the turn was stopped). Never from a missing result row —
+            // successful tools can lack a matched result due to id quoting.
+            if (pendingInterrupted) {
+              pending.toolCalls = pending.toolCalls?.map((c) =>
+                c.result === undefined ? { ...c, interrupted: true } : c
+              );
+              pending.segments = pending.segments?.map((seg) =>
+                seg.kind === "tools"
+                  ? { ...seg, calls: seg.calls.map((c) => (c.result === undefined ? { ...c, interrupted: true } : c)) }
+                  : seg
+              );
+            }
             msgs.push(pending);
             pending = null;
+            pendingInterrupted = false;
           }
           msgs.push(msg);
         }
       }
-      if (pending) msgs.push(pending);
+      if (pending) {
+        if (pendingInterrupted) {
+          pending.toolCalls = pending.toolCalls?.map((c) =>
+            c.result === undefined ? { ...c, interrupted: true } : c
+          );
+          pending.segments = pending.segments?.map((seg) =>
+            seg.kind === "tools"
+              ? { ...seg, calls: seg.calls.map((c) => (c.result === undefined ? { ...c, interrupted: true } : c)) }
+              : seg
+          );
+        }
+        msgs.push(pending);
+      }
       setMessages(msgs);
     } catch (e) {
       setError(`Failed to load messages: ${e instanceof Error ? e.message : e}`);
@@ -1146,9 +1192,21 @@ export default function ChatPage() {
                     });
                   }
                 } else {
-                  // Real tool activity: register the tool + phase.
+                  // Real tool activity: register the tool + phase. A beat
+                  // (tool.progress with beat:true) for an ALREADY-registered
+                  // tool just refreshes its preview — this is how the UI
+                  // shows "still running (25s)…" instead of a frozen chip.
                   const exists = toolEvents.find((t) => t.name === tname && t.durationMs === undefined);
-                  if (!exists) {
+                  if (exists) {
+                    const beatPreview = (payload as any).preview;
+                    if (beatPreview && exists.preview !== beatPreview) {
+                      toolEvents = toolEvents.map((t) => (t === exists ? { ...t, preview: beatPreview } : t));
+                      chain = chain.map((c) =>
+                        c.kind === "tool" && c.tool === exists ? { ...c, tool: { ...c.tool, preview: beatPreview } } : c
+                      );
+                      bumpLive({ tools: toolEvents, chain });
+                    }
+                  } else {
                     const te: ToolEvent = {
                       name: tname,
                       startedAt: Date.now(),
