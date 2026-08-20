@@ -307,6 +307,13 @@ export default function ChatPage() {
                   args: typeof fn?.arguments === "string" ? fn.arguments : JSON.stringify(fn?.arguments ?? {}),
                   result: res?.result,
                   error: res?.error,
+                  // A completed run's tool call with no matched result row is
+                  // still COMPLETED (the call happened; the payload just
+                  // wasn't persisted or the id didn't match). Never render a
+                  // spinner for it — mark it done with unknown duration.
+                  // Interrupted runs still stamp interrupted at flush time and
+                  // take precedence in the icon chain.
+                  durationMs: res ? undefined : 0,
                   // interrupted is stamped at flush time from REAL evidence
                   // (finish_reason indicating the turn was stopped) — never
                   // from a missing result row alone, because tool_call_id
@@ -1229,8 +1236,14 @@ export default function ChatPage() {
                     if (beatPreview && exists.preview !== beatPreview) {
                       dbg("beat", `refresh preview '${tname}': "${(exists.preview ?? "").slice(0, 60)}" -> "${beatPreview.slice(0, 60)}"`, { sessionId, elapsed: Math.round((Date.now() - exists.startedAt) / 1000) });
                       toolEvents = toolEvents.map((t) => (t === exists ? { ...t, preview: beatPreview } : t));
+                      // Match by NAME, not reference: the map above creates a
+                      // NEW object, so `c.tool === exists` fails on the second
+                      // beat and the chain (the render source) freezes at the
+                      // first preview — the "10s pulse but no 20s/30s" bug.
                       chain = chain.map((c) =>
-                        c.kind === "tool" && c.tool === exists ? { ...c, tool: { ...c.tool, preview: beatPreview } } : c
+                        c.kind === "tool" && c.tool.name === tname && c.tool.durationMs === undefined
+                          ? { ...c, tool: { ...c.tool, preview: beatPreview } }
+                          : c
                       );
                       bumpLive({ tools: toolEvents, chain });
                     }

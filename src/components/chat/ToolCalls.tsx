@@ -61,10 +61,13 @@ export function ToolCallChip({
 }) {
   const done = tool.durationMs !== undefined;
   const failed = !!tool.error;
+  // ChatGPT-style: just the tool name, no preview clutter. The live elapsed
+  // ticks every second via the page's busy-timer re-render — the pulse.
   const label =
     mode === "summary"
       ? TOOL_LABELS[tool.name] ?? `Using ${prettyToolName(tool.name)}`
-      : `${prettyToolName(tool.name)}${tool.preview ? ` — ${tool.preview.slice(0, 90)}` : ""}`;
+      : prettyToolName(tool.name);
+  const elapsedMs = done ? (tool.durationMs ?? 0) : Math.max(0, Date.now() - (tool.startedAt ?? Date.now()));
 
   return (
     <div
@@ -90,9 +93,9 @@ export function ToolCallChip({
       {tool.interrupted && !failed && (
         <span className="ml-auto shrink-0 text-[10px] italic opacity-60">interrupted</span>
       )}
-      {!tool.interrupted && tool.durationMs !== undefined && (
+      {!tool.interrupted && (
         <span className="ml-auto shrink-0 font-mono text-[10px] opacity-70">
-          {(tool.durationMs / 1000).toFixed(1)}s
+          {(elapsedMs / 1000).toFixed(1)}s
         </span>
       )}
     </div>

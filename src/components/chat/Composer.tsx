@@ -155,7 +155,7 @@ export const Composer = memo(function Composer({
           }
         }}
         rows={1}
-        placeholder={activeId ? "Message Hermes…  (type / for commands)" : "Type your first message to start…"}
+        placeholder={activeId ? "Message Hermes…" : "Type your first message…"}
         disabled={false}
         className="min-w-0 flex-1 resize-none overflow-y-auto rounded-lg border bg-transparent px-3 py-2 text-sm leading-relaxed outline-none disabled:opacity-50"
         style={{ borderColor: "var(--card-border)", color: "var(--text)", maxHeight: 120 }}
