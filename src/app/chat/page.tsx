@@ -5,7 +5,7 @@ import {
   Send, Mic, MicOff, Volume2, MessageSquare, Plus, ChevronLeft, ChevronRight,
   Loader2, Trash2, Pencil, Square, CheckSquare, X, Maximize2, Minimize2, Bot,
 } from "lucide-react";
-import type { ChatMsg, ChatSettings, StreamEvent, ToolEvent, ChainSegment, RunStats, ToolCallInfo } from "@/lib/chat-types";
+import type { ChatMsg, ChatSettings, StreamEvent, ToolEvent, ChainSegment, RunStats, ToolCallInfo, ChatSegment } from "@/lib/chat-types";
 import { useSessions } from "@/lib/use-sessions";
 import { PROFILES, profileLabel } from "@/lib/profiles";
 import { MessageBubble, MarkdownLite } from "@/components/chat/MessageBubble";
@@ -59,6 +59,11 @@ type ModuleLiveState = {
 
 const moduleLive: Record<string, ModuleLiveState> = {};
 const lastSeqState: Record<string, number> = {};
+// Set when the final assistant message has been appended to the message list
+// (assistant.completed). renderLiveContent reads this to stop rendering the
+// live bubble — otherwise the same reasoning + content shows twice (final
+// bubble + live bubble) between assistant.completed and run.completed.
+const moduleFinalAppended: Record<string, boolean> = {};
 
 function getModuleLive(sessionId: string): ModuleLiveState {
   if (!moduleLive[sessionId]) {
@@ -283,18 +288,29 @@ export default function ChatPage() {
               pending.reasoning = pending.reasoning ? `${pending.reasoning}\n${msg.reasoning}` : msg.reasoning;
               // Preserve the ORDERED turn structure: append a reasoning
               // segment so history renders reasoning → tool → reasoning →
-              // tool → answer exactly like the live chain.
-              pending.segments = [
-                ...(pending.segments ?? []),
-                { kind: "reasoning" as const, text: msg.reasoning },
-              ];
+              // tool → answer exactly like the live chain. Merge adjacent
+              // reasoning segments (a continuous thinking stream is often
+              // persisted across several assistant rows) so history shows
+              // ONE reasoning block per thinking phase, not N fragments.
+              const segs = pending.segments ?? [];
+              const lastSeg = segs[segs.length - 1];
+              if (lastSeg && lastSeg.kind === "reasoning") {
+                pending.segments = [...segs.slice(0, -1), { kind: "reasoning" as const, text: lastSeg.text + "\n" + msg.reasoning }];
+              } else {
+                pending.segments = [...segs, { kind: "reasoning" as const, text: msg.reasoning }];
+              }
             }
             if (msg.toolCalls?.length) {
               pending.toolCalls = [...(pending.toolCalls ?? []), ...msg.toolCalls];
-              pending.segments = [
-                ...(pending.segments ?? []),
-                { kind: "tools" as const, calls: msg.toolCalls },
-              ];
+              // Merge adjacent tool segments too — a burst of tool calls in
+              // one phase renders as one segment, matching the live chain.
+              const segs = pending.segments ?? [];
+              const lastSeg = segs[segs.length - 1];
+              if (lastSeg && lastSeg.kind === "tools") {
+                pending.segments = [...segs.slice(0, -1), { kind: "tools" as const, calls: [...lastSeg.calls, ...msg.toolCalls] }];
+              } else {
+                pending.segments = [...segs, { kind: "tools" as const, calls: msg.toolCalls }];
+              }
             }
           } else {
             pending = {
@@ -893,6 +909,7 @@ export default function ChatPage() {
       setMessages((m) => [...m, { role: "user", content: trimmed }]);
       setBusy(true);
       setError(null);
+      if (sessionId) moduleFinalAppended[sessionId] = false;
       setLive({
         phase: "initializing",
         reasoning: "",
@@ -1105,11 +1122,24 @@ export default function ChatPage() {
                 const exists = toolEvents.find((t) => t.name === tname && t.durationMs === undefined);
                 let te: ToolEvent | null = null;
                 if (!exists) {
-                  te = { name: tname, startedAt: Date.now(), preview: (payload as any).preview ?? undefined };
+                  te = {
+                    name: tname,
+                    startedAt: Date.now(),
+                    preview: (payload as any).preview ?? undefined,
+                    args: (payload as any).args !== undefined ? JSON.stringify((payload as any).args).slice(0, 2000) : undefined,
+                  };
                   toolEvents = [...toolEvents, te];
                   toolCount += 1;
                 } else {
-                  toolEvents = toolEvents.map((t) => (t === exists ? { ...t, preview: (payload as any).preview ?? t.preview } : t));
+                  toolEvents = toolEvents.map((t) =>
+                    t === exists
+                      ? {
+                          ...t,
+                          preview: (payload as any).preview ?? t.preview,
+                          args: (payload as any).args !== undefined ? JSON.stringify((payload as any).args).slice(0, 2000) : t.args,
+                        }
+                      : t
+                  );
                   te = exists;
                 }
                 bumpLive({
@@ -1165,17 +1195,47 @@ export default function ChatPage() {
                 if (content) {
                   full = content;
                   setStreamedText(content);
+                  // Build the FINAL message with the full ordered chain
+                  // (reasoning + tools interleaved) so the bubble keeps the
+                  // tool calls after the run — and the live bubble stops
+                  // rendering (phase done + busy false) so the reply never
+                  // appears twice.
+                  const finalSegments: ChatSegment[] = chain.map((c) =>
+                    c.kind === "reasoning"
+                      ? { kind: "reasoning" as const, text: c.text }
+                      : { kind: "tools" as const, calls: [{ name: c.tool.name, args: c.tool.args, result: undefined, error: c.tool.error, durationMs: c.tool.durationMs }] }
+                  );
+                  const finalToolCalls: ToolCallInfo[] = toolEvents.map((t) => ({
+                    name: t.name,
+                    args: t.args,
+                    result: undefined,
+                    error: t.error,
+                    durationMs: t.durationMs,
+                  }));
                   setMessages((m) => {
                     const copy = [...m];
                     const last = copy[copy.length - 1];
                     if (last?.role === "assistant") {
-                      copy[copy.length - 1] = { ...last, content, reasoning: reasoning || null };
+                      copy[copy.length - 1] = {
+                        ...last,
+                        content,
+                        reasoning: reasoning || null,
+                        segments: finalSegments.length > 0 ? finalSegments : undefined,
+                        toolCalls: finalToolCalls.length > 0 ? finalToolCalls : undefined,
+                      };
                     } else {
-                      copy.push({ role: "assistant", content, reasoning: reasoning || null });
+                      copy.push({
+                        role: "assistant",
+                        content,
+                        reasoning: reasoning || null,
+                        segments: finalSegments.length > 0 ? finalSegments : undefined,
+                        toolCalls: finalToolCalls.length > 0 ? finalToolCalls : undefined,
+                      });
                     }
                     return copy;
                   });
                   assistantAppended = true;
+                  if (sessionId) moduleFinalAppended[sessionId] = true;
                 }
                 runRuntime = (payload as any).runtime ?? runRuntime;
                 bumpLive({ phase: "streaming", stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), runtime: runRuntime } });
@@ -1186,8 +1246,24 @@ export default function ChatPage() {
                 runRuntime = (payload as any).runtime ?? runRuntime;
                 completedCleanly = true;
                 const completedAt = Date.now();
+                // Settle any tool still showing a spinner — a clean
+                // run.completed means every tool finished; mark them done
+                // so the UI never shows "loading forever" after a run.
+                const nowMs = Date.now();
+                toolEvents = toolEvents.map((t) =>
+                  t.durationMs === undefined
+                    ? { ...t, durationMs: Math.max(1, nowMs - (t.startedAt ?? nowMs)), error: t.error ?? false }
+                    : t
+                );
+                chain = chain.map((c) =>
+                  c.kind === "tool" && c.tool.durationMs === undefined
+                    ? { ...c, tool: { ...c.tool, durationMs: Math.max(1, nowMs - (c.tool.startedAt ?? nowMs)), error: c.tool.error ?? false } }
+                    : c
+                );
                 bumpLive({
                   phase: "done",
+                  tools: toolEvents,
+                  chain,
                   stats: {
                     toolCount,
                     failedTools: failedCount,
@@ -1251,21 +1327,37 @@ export default function ChatPage() {
         streamAbort.current = null;
         // Ensure the run settles to "done" even if the SSE tail (run.completed
         // with usage/runtime) was dropped through the proxy chain — the footer
-        // should always appear with whatever stats we captured.
+        // should always appear with whatever stats we captured. Settle the
+        // MODULE snapshot too (even when the user navigated away) so returning
+        // to this conversation never shows spinning tools.
+        const settle = (prev: LiveState): LiveState => {
+          if (prev.phase === "error") return prev;
+          const now = Date.now();
+          const tools = prev.tools.map((t) =>
+            t.durationMs === undefined
+              ? { ...t, durationMs: Math.max(1, now - (t.startedAt ?? now)), error: t.error ?? false }
+              : t
+          );
+          const chain = prev.chain.map((c) =>
+            c.kind === "tool" && c.tool.durationMs === undefined
+              ? { ...c, tool: { ...c.tool, durationMs: Math.max(1, now - (c.tool.startedAt ?? now)), error: c.tool.error ?? false } }
+              : c
+          );
+          return {
+            ...prev,
+            tools,
+            chain,
+            phase: "done",
+            stats: {
+              ...(prev.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }),
+              completedAt: now,
+              durationMs: now - (prev.stats?.startedAt ?? now),
+            },
+          };
+        };
         if (stillViewing) {
           setLive((prev) => {
-            const settled: LiveState =
-              prev.phase === "error"
-                ? prev
-                : {
-                    ...prev,
-                    phase: "done",
-                    stats: {
-                      ...(prev.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }),
-                      completedAt: Date.now(),
-                      durationMs: Date.now() - (prev.stats?.startedAt ?? Date.now()),
-                    },
-                  };
+            const settled = settle(prev);
             // Persist the last run's stats so the permanent footer keeps showing
             // them after the run settles (idle state otherwise clears them).
             if (settled.stats) setLastStats(settled.stats);
@@ -1277,6 +1369,13 @@ export default function ChatPage() {
             }
             return settled;
           });
+        } else if (sessionId) {
+          // User navigated away mid-run — settle the module snapshot so
+          // returning never shows infinite spinners.
+          const m = getModuleLive(sessionId);
+          m.live = settle(m.live);
+          m.streamSession = null;
+          liveBySessionRef.current[sessionId] = { live: m.live, streamedText: m.streamedText };
         }
         // Reconcile against ground truth ONLY when the SSE tail was dropped
         // (run.completed never arrived). When it did arrive, the local message
@@ -1493,8 +1592,22 @@ export default function ChatPage() {
               livePhase = false;
               const completedAt = Date.now();
               setLive((p) => {
+                // Settle any still-pending tools — the run is over.
+                const now = Date.now();
+                const tools = p.tools.map((t) =>
+                  t.durationMs === undefined
+                    ? { ...t, durationMs: Math.max(1, now - (t.startedAt ?? now)), error: t.error ?? false }
+                    : t
+                );
+                const chain = p.chain.map((c) =>
+                  c.kind === "tool" && c.tool.durationMs === undefined
+                    ? { ...c, tool: { ...c.tool, durationMs: Math.max(1, now - (c.tool.startedAt ?? now)), error: c.tool.error ?? false } }
+                    : c
+                );
                 const next: LiveState = {
                   ...p,
+                  tools,
+                  chain,
                   phase: "done",
                   stats: {
                     toolCount: p.toolCount,
@@ -1884,6 +1997,11 @@ export default function ChatPage() {
 
   const renderLiveContent = () => {
     if (live.phase === "idle") return null;
+    // Once the final assistant message has been appended (assistant.completed),
+    // the live bubble is redundant — the final bubble already carries the full
+    // reasoning + tool chain + content. Stop rendering it so the reply never
+    // appears twice (final bubble + live bubble).
+    if (activeId && moduleFinalAppended[activeId]) return null;
     const showReasoning =
       live.reasoning && settings.reasoning !== "hidden";
 
@@ -1999,7 +2117,7 @@ export default function ChatPage() {
           <ChatSettingsButton settings={settings} onChange={setSettings} />
           <button
             onClick={newConversation}
-            disabled={busy}
+            disabled={false}
             className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
             style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-2))" }}
           >
@@ -2385,7 +2503,7 @@ export default function ChatPage() {
                     }
                   }}
                   placeholder={activeId ? "Message Hermes…  (type / for commands)" : "Type your first message to start…"}
-                  disabled={busy}
+                  disabled={false}
                   className="min-h-0 flex-1 resize-none bg-transparent px-4 py-3 text-sm leading-relaxed outline-none disabled:opacity-50"
                   style={{ color: "var(--text)" }}
                 />

@@ -42,6 +42,7 @@ export type ToolEvent = {
   durationMs?: number;
   error?: boolean;
   preview?: string;
+  args?: string;
 };
 
 // Ordered chain segment for the LIVE view — reasoning and tool calls are

@@ -9,7 +9,7 @@ import {
   Brain, ChevronDown, ChevronRight, X, Loader2, Wrench, CheckCircle2,
   XCircle, TerminalSquare, FileText, Globe, Search,
 } from "lucide-react";
-import type { ChainSegment, ToolCallInfo, ToolEvent } from "@/lib/chat-types";
+import type { ChainSegment, ChatSegment, ToolCallInfo, ToolEvent } from "@/lib/chat-types";
 
 function toolIcon(name: string) {
   const n = name.toLowerCase();
@@ -49,6 +49,7 @@ export function ChainView({
   toolCalls,
   liveTools,
   chain,
+  segments,
   content,
   onClose,
 }: {
@@ -56,6 +57,7 @@ export function ChainView({
   toolCalls: ToolCallInfo[];
   liveTools: ToolEvent[];
   chain?: ChainSegment[];
+  segments?: ChatSegment[];
   content: string;
   onClose: () => void;
 }) {
@@ -65,12 +67,15 @@ export function ChainView({
   // sequence they happened.
   const merged: { name: string; args?: string; result?: string; error?: boolean; live?: boolean }[] = [
     ...toolCalls.map((c) => ({ name: c.name, args: c.args, result: c.result, error: c.error })),
-    ...liveTools.map((t) => ({ name: t.name, live: true, error: t.error })),
+    ...liveTools.map((t) => ({ name: t.name, live: true, error: t.error, args: t.args })),
   ];
 
   // Ordered segments for the live chain: reasoning blocks and tool chips
   // interleaved exactly as they happened (reasoning → tool → reasoning → tool).
   const liveSegments = chain ?? [];
+  // Ordered segments for HISTORY bubbles (persisted ChatSegment[]): same
+  // interleave, so the fullscreen view of a past turn matches the live one.
+  const historySegments = segments ?? [];
 
   return (
     <div
@@ -141,6 +146,69 @@ export function ChainView({
                       <span className="ml-auto font-mono text-[10px] opacity-70">{(seg.tool.durationMs / 1000).toFixed(1)}s</span>
                     )}
                   </div>
+                  {seg.tool.args && (
+                    <Collapsible title={<span className="font-mono text-[10px]">args</span>}>
+                      <pre className="overflow-x-auto whitespace-pre-wrap text-[10px] leading-relaxed" style={{ color: "var(--text-dim)" }}>
+                        {seg.tool.args}
+                      </pre>
+                    </Collapsible>
+                  )}
+                </div>
+              )
+            )
+          ) : historySegments.length > 0 ? (
+            historySegments.map((seg, i) =>
+              seg.kind === "reasoning" ? (
+                <div key={`hr-${i}`} className="rounded-lg border-l-2 px-3 py-2" style={{ borderLeftColor: "var(--accent)", background: "rgba(124,108,255,0.06)" }}>
+                  <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold" style={{ color: "var(--text-faint)" }}>
+                    <Brain className="h-3 w-3" style={{ color: "var(--accent)" }} />
+                    Reasoning
+                  </div>
+                  <div className="whitespace-pre-wrap text-xs leading-relaxed" style={{ color: "var(--text-dim)" }}>
+                    {seg.text}
+                  </div>
+                </div>
+              ) : (
+                <div key={`ht-${i}`} className="space-y-1.5">
+                  {seg.calls.map((c, j) => (
+                    <div key={`htc-${j}`} className="space-y-1.5">
+                      <div
+                        className="flex items-center gap-2 rounded-lg border px-3 py-2 text-xs"
+                        style={{
+                          borderColor: c.error ? "color-mix(in srgb, var(--red) 40%, transparent)" : "var(--card-border)",
+                          background: c.error ? "rgba(255,92,92,0.08)" : "color-mix(in srgb, var(--bg) 55%, transparent)",
+                          color: c.error ? "var(--red)" : "var(--text-dim)",
+                        }}
+                      >
+                        {c.error ? (
+                          <XCircle className="h-3.5 w-3.5 shrink-0" />
+                        ) : c.result !== undefined ? (
+                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--green)" }} />
+                        ) : (
+                          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" style={{ color: "var(--accent)" }} />
+                        )}
+                        {toolIcon(c.name)}
+                        <span className="font-semibold">{prettyName(c.name)}</span>
+                        {c.durationMs !== undefined && (
+                          <span className="ml-auto font-mono text-[10px] opacity-70">{(c.durationMs / 1000).toFixed(1)}s</span>
+                        )}
+                      </div>
+                      {c.args && (
+                        <Collapsible title={<span className="font-mono text-[10px]">args</span>}>
+                          <pre className="overflow-x-auto whitespace-pre-wrap text-[10px] leading-relaxed" style={{ color: "var(--text-dim)" }}>
+                            {c.args}
+                          </pre>
+                        </Collapsible>
+                      )}
+                      {c.result !== undefined && (
+                        <Collapsible title={<span className="font-mono text-[10px]">result ({c.result.length} chars)</span>}>
+                          <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap text-[10px] leading-relaxed" style={{ color: "var(--text-dim)" }}>
+                            {c.result || "(empty)"}
+                          </pre>
+                        </Collapsible>
+                      )}
+                    </div>
+                  ))}
                 </div>
               )
             )

@@ -221,6 +221,7 @@ export const MessageBubble = memo(function MessageBubble({
           reasoning={msg.reasoning ?? ""}
           toolCalls={msg.toolCalls ?? []}
           liveTools={tools ?? []}
+          segments={msg.segments}
           content={msg.content}
           onClose={() => setChainOpen(false)}
         />
@@ -256,7 +257,7 @@ function HistoryToolCalls({ calls, mode }: { calls: ToolCallInfo[]; mode: ChatSe
         >
           {c.error ? (
             <XCircle className="h-3.5 w-3.5 shrink-0" />
-          ) : c.result !== undefined ? (
+          ) : c.result !== undefined || c.durationMs !== undefined ? (
             <CheckCircle2 className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--green)" }} />
           ) : (
             <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" style={{ color: "var(--accent)" }} />
