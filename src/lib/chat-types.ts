@@ -34,6 +34,11 @@ export type ToolCallInfo = {
   result?: string;
   error?: boolean;
   durationMs?: number;
+  // History reconstruction sets this when the persisted transcript has NO
+  // tool-result row for this call (cancelled/interrupted runs, dropped
+  // persistence). The chip renders a muted "interrupted" state instead of a
+  // spinner or a fabricated success.
+  interrupted?: boolean;
 };
 
 export type ToolEvent = {
@@ -43,6 +48,10 @@ export type ToolEvent = {
   error?: boolean;
   preview?: string;
   args?: string;
+  // True when the run ended without this tool ever receiving a completion
+  // frame (dropped through the proxy). Renders a muted "interrupted" state —
+  // never a fabricated success or an eternal spinner.
+  interrupted?: boolean;
 };
 
 // Ordered chain segment for the LIVE view — reasoning and tool calls are

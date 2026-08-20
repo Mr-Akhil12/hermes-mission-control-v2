@@ -4,7 +4,7 @@
 // rendering. Reasoning display respects the user's setting.
 
 import { memo, useState } from "react";
-import { Brain, ChevronDown, ChevronRight, Wrench, CheckCircle2, XCircle, Loader2, TerminalSquare, FileText, Globe, Search, Maximize2 } from "lucide-react";
+import { Brain, ChevronDown, ChevronRight, Wrench, CheckCircle2, XCircle, Loader2, TerminalSquare, FileText, Globe, Search, Maximize2, CircleSlash2 } from "lucide-react";
 import type { ChatSettings, ChatMsg, ToolEvent, ToolCallInfo } from "@/lib/chat-types";
 import { ToolCallStack } from "./ToolCalls";
 import { ChainView } from "./ChainView";
@@ -257,13 +257,18 @@ function HistoryToolCalls({ calls, mode }: { calls: ToolCallInfo[]; mode: ChatSe
         >
           {c.error ? (
             <XCircle className="h-3.5 w-3.5 shrink-0" />
+          ) : c.interrupted ? (
+            <CircleSlash2 className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--text-faint)" }} />
           ) : c.result !== undefined || c.durationMs !== undefined ? (
             <CheckCircle2 className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--green)" }} />
           ) : (
             <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" style={{ color: "var(--accent)" }} />
           )}
           <span className="truncate">{c.name.replace(/_/g, " ")}</span>
-          {c.result !== undefined && (
+          {c.interrupted && (
+            <span className="ml-auto shrink-0 text-[10px] italic opacity-60">interrupted</span>
+          )}
+          {!c.interrupted && c.result !== undefined && (
             <span className="ml-auto shrink-0 font-mono text-[10px] opacity-70">
               {c.result.length > 0 ? `${c.result.length} chars` : "empty"}
             </span>

@@ -674,7 +674,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 while True:
                     try:
-                        chunk = resp.read(4096)
+                        # read1() returns whatever bytes are available RIGHT
+                        # NOW instead of blocking to fill 4096 — sparse SSE
+                        # frames (reasoning deltas, tool.completed) flush to
+                        # the client immediately instead of buffering up to
+                        # the 15s socket budget. Same fix as the chat-stream
+                        # path (line ~1365).
+                        chunk = resp.read1(4096)
                         if not chunk:
                             break
                         self.wfile.write(chunk)

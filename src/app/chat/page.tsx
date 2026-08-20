@@ -64,6 +64,26 @@ const lastSeqState: Record<string, number> = {};
 // live bubble — otherwise the same reasoning + content shows twice (final
 // bubble + live bubble) between assistant.completed and run.completed.
 const moduleFinalAppended: Record<string, boolean> = {};
+// Per-session run generation. Incremented on every new send AND when the
+// user switches INTO a session (selectSession/newConversation/profile switch).
+// moduleFinalAppended must match the CURRENT generation to suppress the live
+// bubble — a stale `true` from a previous run on this session must not hide a
+// new run's live reasoning.
+const moduleRunGen: Record<string, number> = {};
+
+function bumpRunGen(sessionId: string | null | undefined): void {
+  if (!sessionId) return;
+  moduleRunGen[sessionId] = (moduleRunGen[sessionId] ?? 0) + 1;
+  moduleFinalAppended[sessionId] = false;
+}
+
+function isFinalAppendedForCurrentRun(sessionId: string | null | undefined): boolean {
+  if (!sessionId) return false;
+  const gen = moduleRunGen[sessionId];
+  // No generation recorded yet (nothing ran) → nothing appended.
+  if (gen === undefined) return false;
+  return moduleFinalAppended[sessionId] === true;
+}
 
 function getModuleLive(sessionId: string): ModuleLiveState {
   if (!moduleLive[sessionId]) {
@@ -97,20 +117,32 @@ function appendReasoningToChain(chain: ChainSegment[], delta: string): ChainSegm
   return [...chain, { kind: "reasoning", text: delta }];
 }
 
+// Settle a tool that never received a completion frame: mark it INTERRUPTED
+// (muted state) instead of fabricating error:false — a dropped tool.failed
+// frame must not render as a green checkmark. A tool that DID get a real
+// completion keeps its error bit.
+function settleTool(t: ToolEvent, now: number): ToolEvent {
+  if (t.durationMs !== undefined) return t;
+  return {
+    ...t,
+    durationMs: Math.max(1, now - (t.startedAt ?? now)),
+    interrupted: t.error === undefined,
+  };
+}
+
+function settleToolInChain(c: ChainSegment, now: number): ChainSegment {
+  if (c.kind === "reasoning") return c;
+  return { ...c, tool: settleTool(c.tool, now) };
+}
+
 // Settle a live snapshot once a run is confirmed finished: every tool with
 // no duration (still showing the spinner) gets a completion time, and the
 // phase flips to "done" so returning to the chat NEVER shows infinite
-// loading tools. The ordered chain is preserved (tools marked completed).
-function settleLiveState(live: LiveState): LiveState {
-  const now = Date.now();
-  const tools = live.tools.map((t) =>
-    t.durationMs === undefined ? { ...t, durationMs: now - t.startedAt, error: t.error ?? false } : t
-  );
-  const chain = live.chain.map((c) =>
-    c.kind === "tool" && c.tool.durationMs === undefined
-      ? { ...c, tool: { ...c.tool, durationMs: now - c.tool.startedAt, error: c.tool.error ?? false } }
-      : c
-  );
+// loading tools. The ordered chain is preserved (tools marked completed or
+// interrupted — never fabricated success).
+function settleLiveState(live: LiveState, now = Date.now()): LiveState {
+  const tools = live.tools.map((t) => settleTool(t, now));
+  const chain = live.chain.map((c) => settleToolInChain(c, now));
   return { ...live, tools, chain, phase: "done" };
 }
 
@@ -259,6 +291,11 @@ export default function ChatPage() {
                   args: typeof fn?.arguments === "string" ? fn.arguments : JSON.stringify(fn?.arguments ?? {}),
                   result: res?.result,
                   error: res?.error,
+                  // No persisted result row = the call was cancelled or
+                  // interrupted (or persistence dropped it). Mark it so the
+                  // chip renders a muted "interrupted" state instead of a
+                  // forever-spinner or a fabricated success check.
+                  interrupted: res === undefined,
                 };
               });
             }
@@ -404,7 +441,13 @@ export default function ChatPage() {
     // first send() instead. Just clear the UI and arm the composer.
     setError(null);
     setLive(IDLE_LIVE);
-    if (activeId) draftsRef.current[activeId] = input;
+    if (activeId) {
+      draftsRef.current[activeId] = input;
+      // Leaving this session for a fresh conversation — reset its run
+      // generation so a future return to it isn't gated by a stale
+      // moduleFinalAppended=true from the previous run.
+      bumpRunGen(activeId);
+    }
     setActiveId(null);
     setMessages([]);
     setStreamedText("");
@@ -909,7 +952,7 @@ export default function ChatPage() {
       setMessages((m) => [...m, { role: "user", content: trimmed }]);
       setBusy(true);
       setError(null);
-      if (sessionId) moduleFinalAppended[sessionId] = false;
+      bumpRunGen(sessionId);
       setLive({
         phase: "initializing",
         reasoning: "",
@@ -1210,16 +1253,8 @@ export default function ChatPage() {
                   // Freeze the FINAL message with settled tools so its chips
                   // never render a spinner that can no longer be updated.
                   const settleMs = Date.now();
-                  toolEvents = toolEvents.map((t) =>
-                    t.durationMs === undefined
-                      ? { ...t, durationMs: Math.max(1, settleMs - (t.startedAt ?? settleMs)), error: t.error ?? false }
-                      : t
-                  );
-                  chain = chain.map((c) =>
-                    c.kind === "tool" && c.tool.durationMs === undefined
-                      ? { ...c, tool: { ...c.tool, durationMs: Math.max(1, settleMs - (c.tool.startedAt ?? settleMs)), error: c.tool.error ?? false } }
-                      : c
-                  );
+                  toolEvents = toolEvents.map((t) => settleTool(t, settleMs));
+                  chain = chain.map((c) => settleToolInChain(c, settleMs));
                   // Build the FINAL message with the full ordered chain
                   // (reasoning + tools interleaved) so the bubble keeps the
                   // tool calls after the run — and the live bubble stops
@@ -1260,6 +1295,7 @@ export default function ChatPage() {
                     return copy;
                   });
                   assistantAppended = true;
+                  bumpRunGen(sessionId);
                   if (sessionId) moduleFinalAppended[sessionId] = true;
                 }
                 runRuntime = (payload as any).runtime ?? runRuntime;
@@ -1275,16 +1311,8 @@ export default function ChatPage() {
                 // run.completed means every tool finished; mark them done
                 // so the UI never shows "loading forever" after a run.
                 const nowMs = Date.now();
-                toolEvents = toolEvents.map((t) =>
-                  t.durationMs === undefined
-                    ? { ...t, durationMs: Math.max(1, nowMs - (t.startedAt ?? nowMs)), error: t.error ?? false }
-                    : t
-                );
-                chain = chain.map((c) =>
-                  c.kind === "tool" && c.tool.durationMs === undefined
-                    ? { ...c, tool: { ...c.tool, durationMs: Math.max(1, nowMs - (c.tool.startedAt ?? nowMs)), error: c.tool.error ?? false } }
-                    : c
-                );
+                toolEvents = toolEvents.map((t) => settleTool(t, nowMs));
+                chain = chain.map((c) => settleToolInChain(c, nowMs));
                 bumpLive({
                   phase: "done",
                   tools: toolEvents,
@@ -1379,16 +1407,8 @@ export default function ChatPage() {
         const settle = (prev: LiveState): LiveState => {
           if (prev.phase === "error") return prev;
           const now = Date.now();
-          const tools = prev.tools.map((t) =>
-            t.durationMs === undefined
-              ? { ...t, durationMs: Math.max(1, now - (t.startedAt ?? now)), error: t.error ?? false }
-              : t
-          );
-          const chain = prev.chain.map((c) =>
-            c.kind === "tool" && c.tool.durationMs === undefined
-              ? { ...c, tool: { ...c.tool, durationMs: Math.max(1, now - (c.tool.startedAt ?? now)), error: c.tool.error ?? false } }
-              : c
-          );
+          const tools = prev.tools.map((t) => settleTool(t, now));
+          const chain = prev.chain.map((c) => settleToolInChain(c, now));
           return {
             ...prev,
             tools,
@@ -1621,15 +1641,36 @@ export default function ChatPage() {
               if (content) {
                 setStreamedText(content);
                 m.streamedText = content;
-                m.live = { ...m.live, phase: "streaming" };
+                // Build the settled chain snapshot exactly like the primary
+                // send() path, and set the moduleFinalAppended gate so the
+                // live bubble stops rendering (no duplicate reply flash on
+                // tab-return).
+                const settleMs = Date.now();
+                const settledTools = m.live.tools.map((t) => settleTool(t, settleMs));
+                const settledChain = m.live.chain.map((c) => settleToolInChain(c, settleMs));
+                const finalSegments: ChatSegment[] = settledChain.map((c) =>
+                  c.kind === "reasoning"
+                    ? { kind: "reasoning" as const, text: c.text }
+                    : { kind: "tools" as const, calls: [{ name: c.tool.name, args: c.tool.args, result: undefined, error: c.tool.error, durationMs: c.tool.durationMs, interrupted: c.tool.interrupted }] }
+                );
+                const finalToolCalls: ToolCallInfo[] = settledTools.map((t) => ({
+                  name: t.name,
+                  args: t.args,
+                  result: undefined,
+                  error: t.error,
+                  durationMs: t.durationMs,
+                  interrupted: t.interrupted,
+                }));
+                moduleFinalAppended[sessionId] = true;
+                m.live = { ...m.live, phase: "streaming", tools: settledTools, chain: settledChain };
                 liveBySessionRef.current[sessionId] = { live: m.live, streamedText: content };
                 setMessages((prev) => {
                   const copy = [...prev];
                   const last = copy[copy.length - 1];
                   if (last?.role === "assistant") {
-                    copy[copy.length - 1] = { ...last, content };
+                    copy[copy.length - 1] = { ...last, content, segments: finalSegments.length > 0 ? finalSegments : undefined, toolCalls: finalToolCalls.length > 0 ? finalToolCalls : undefined };
                   } else {
-                    copy.push({ role: "assistant", content });
+                    copy.push({ role: "assistant", content, segments: finalSegments.length > 0 ? finalSegments : undefined, toolCalls: finalToolCalls.length > 0 ? finalToolCalls : undefined });
                   }
                   return copy;
                 });
@@ -1640,16 +1681,8 @@ export default function ChatPage() {
               setLive((p) => {
                 // Settle any still-pending tools — the run is over.
                 const now = Date.now();
-                const tools = p.tools.map((t) =>
-                  t.durationMs === undefined
-                    ? { ...t, durationMs: Math.max(1, now - (t.startedAt ?? now)), error: t.error ?? false }
-                    : t
-                );
-                const chain = p.chain.map((c) =>
-                  c.kind === "tool" && c.tool.durationMs === undefined
-                    ? { ...c, tool: { ...c.tool, durationMs: Math.max(1, now - (c.tool.startedAt ?? now)), error: c.tool.error ?? false } }
-                    : c
-                );
+                const tools = p.tools.map((t) => settleTool(t, now));
+                const chain = p.chain.map((c) => settleToolInChain(c, now));
                 const next: LiveState = {
                   ...p,
                   tools,
@@ -1674,6 +1707,37 @@ export default function ChatPage() {
               setLastStats((prev) => ({ ...(prev ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), ...(payload.usage ? { usage: payload.usage, runtime: payload.runtime } : {}) }));
               setBusy(false);
               streamSessionRef.current = null;
+              // Re-apply the settled chain to the appended message so its
+              // chips show final durations/interrupted state (never a spinner).
+              const finalSegs: ChatSegment[] = m.live.chain.map((c) =>
+                c.kind === "reasoning"
+                  ? { kind: "reasoning" as const, text: c.text }
+                  : { kind: "tools" as const, calls: [{ name: c.tool.name, args: c.tool.args, result: undefined, error: c.tool.error, durationMs: c.tool.durationMs, interrupted: c.tool.interrupted }] }
+              );
+              const finalTools: ToolCallInfo[] = m.live.tools.map((t) => ({
+                name: t.name,
+                args: t.args,
+                result: undefined,
+                error: t.error,
+                durationMs: t.durationMs,
+                interrupted: t.interrupted,
+              }));
+              if (finalSegs.length > 0 || finalTools.length > 0) {
+                setMessages((prev) => {
+                  const copy = [...prev];
+                  for (let i = copy.length - 1; i >= 0; i--) {
+                    if (copy[i].role === "assistant") {
+                      copy[i] = {
+                        ...copy[i],
+                        segments: finalSegs.length > 0 ? finalSegs : copy[i].segments,
+                        toolCalls: finalTools.length > 0 ? finalTools : copy[i].toolCalls,
+                      };
+                      break;
+                    }
+                  }
+                  return copy;
+                });
+              }
             } else if (payload.event === "done" || payload.event === "error") {
               if (payload.event === "error") {
                 setError(payload.error ?? payload.message ?? "Stream error");
@@ -1729,16 +1793,8 @@ export default function ChatPage() {
           setLive((p) => {
             const stillPending = p.tools.some((t) => t.durationMs === undefined);
             if (!stillPending && p.phase === "done") return p;
-            const tools = p.tools.map((t) =>
-              t.durationMs === undefined
-                ? { ...t, durationMs: Math.max(1, now - (t.startedAt ?? now)), error: t.error ?? false }
-                : t
-            );
-            const chain = p.chain.map((c) =>
-              c.kind === "tool" && c.tool.durationMs === undefined
-                ? { ...c, tool: { ...c.tool, durationMs: Math.max(1, now - (c.tool.startedAt ?? now)), error: c.tool.error ?? false } }
-                : c
-            );
+            const tools = p.tools.map((t) => settleTool(t, now));
+            const chain = p.chain.map((c) => settleToolInChain(c, now));
             const next = { ...p, tools, chain, phase: "done" as const };
             m.live = next;
             liveBySessionRef.current[sessionId] = { live: next, streamedText: m.streamedText };
@@ -1913,6 +1969,10 @@ export default function ChatPage() {
     setMessages([]);
     setStreamedText("");
     setLive(IDLE_LIVE);
+    // Entering a session is a new display generation — a stale
+    // moduleFinalAppended=true from a previous completed run on this session
+    // must not suppress the live bubble of a run we reattach to.
+    bumpRunGen(id);
     // Restore this session's live state if it has one (background stream).
     const saved = liveBySessionRef.current[id];
     if (saved) {
@@ -2046,8 +2106,10 @@ export default function ChatPage() {
     // Once the final assistant message has been appended (assistant.completed),
     // the live bubble is redundant — the final bubble already carries the full
     // reasoning + tool chain + content. Stop rendering it so the reply never
-    // appears twice (final bubble + live bubble).
-    if (activeId && moduleFinalAppended[activeId]) return null;
+    // appears twice (final bubble + live bubble). Generation-tagged: a stale
+    // flag from a previous run on this session can't suppress a NEW run's
+    // live bubble (bumpRunGen resets it on every send and session entry).
+    if (activeId && isFinalAppendedForCurrentRun(activeId)) return null;
     const showReasoning =
       live.reasoning && settings.reasoning !== "hidden";
 

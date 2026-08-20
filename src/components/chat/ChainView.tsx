@@ -7,7 +7,7 @@
 import { useState } from "react";
 import {
   Brain, ChevronDown, ChevronRight, X, Loader2, Wrench, CheckCircle2,
-  XCircle, TerminalSquare, FileText, Globe, Search,
+  XCircle, TerminalSquare, FileText, Globe, Search, CircleSlash2,
 } from "lucide-react";
 import type { ChainSegment, ChatSegment, ToolCallInfo, ToolEvent } from "@/lib/chat-types";
 
@@ -136,6 +136,8 @@ export function ChainView({
                       <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" style={{ color: "var(--accent)" }} />
                     ) : seg.tool.error ? (
                       <XCircle className="h-3.5 w-3.5 shrink-0" />
+                    ) : seg.tool.interrupted ? (
+                      <CircleSlash2 className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--text-faint)" }} />
                     ) : (
                       <CheckCircle2 className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--green)" }} />
                     )}
@@ -182,14 +184,19 @@ export function ChainView({
                       >
                         {c.error ? (
                           <XCircle className="h-3.5 w-3.5 shrink-0" />
-                        ) : c.result !== undefined ? (
+                        ) : c.interrupted ? (
+                          <CircleSlash2 className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--text-faint)" }} />
+                        ) : c.result !== undefined || c.durationMs !== undefined ? (
                           <CheckCircle2 className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--green)" }} />
                         ) : (
                           <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" style={{ color: "var(--accent)" }} />
                         )}
                         {toolIcon(c.name)}
                         <span className="font-semibold">{prettyName(c.name)}</span>
-                        {c.durationMs !== undefined && (
+                        {c.interrupted && (
+                          <span className="ml-auto text-[10px] italic opacity-60">interrupted</span>
+                        )}
+                        {c.durationMs !== undefined && !c.interrupted && (
                           <span className="ml-auto font-mono text-[10px] opacity-70">{(c.durationMs / 1000).toFixed(1)}s</span>
                         )}
                       </div>

@@ -10,6 +10,7 @@ import {
   CheckCircle2,
   XCircle,
   Loader2,
+  CircleSlash2,
 } from "lucide-react";
 import type { ToolEvent } from "@/lib/chat-types";
 
@@ -77,6 +78,8 @@ export function ToolCallChip({
       {done ? (
         failed ? (
           <XCircle className="h-3.5 w-3.5 shrink-0" />
+        ) : tool.interrupted ? (
+          <CircleSlash2 className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--text-faint)" }} />
         ) : (
           <CheckCircle2 className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--green)" }} />
         )
@@ -84,7 +87,10 @@ export function ToolCallChip({
         <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" style={{ color: "var(--accent)" }} />
       )}
       <span className="truncate">{label}</span>
-      {tool.durationMs !== undefined && (
+      {tool.interrupted && !failed && (
+        <span className="ml-auto shrink-0 text-[10px] italic opacity-60">interrupted</span>
+      )}
+      {!tool.interrupted && tool.durationMs !== undefined && (
         <span className="ml-auto shrink-0 font-mono text-[10px] opacity-70">
           {(tool.durationMs / 1000).toFixed(1)}s
         </span>
