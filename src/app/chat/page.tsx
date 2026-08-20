@@ -1599,6 +1599,15 @@ export default function ChatPage() {
   // exactly as it was — no rebuild, no refresh.
   const lastSeqRef = useRef(lastSeqState);
   const reattachAbort = useRef<AbortController | null>(null);
+  // Reattach serialization: only ONE live /events subscription per session.
+  // Without this, visibilitychange + mount effect + selectSession + the 15s
+  // session poll fire concurrent GET /events calls that race the seq cursor
+  // (observed live: two reattaches at once, since=3 AND since=7).
+  const reattachInflight = useRef<Set<string>>(new Set());
+  // No-op cooldown: a reattach that found nothing (run already finished /
+  // rotated) must not be re-triggered by every 15s poll — otherwise the
+  // observed hammer loop (reattach + loadMessages every ~15s) persists.
+  const reattachNoopAt = useRef<Record<string, number>>({});
 
   const reattachRun = useCallback(
     async (sessionId: string) => {
@@ -1606,6 +1615,15 @@ export default function ChatPage() {
       dbg("reattach", `reattachRun START since=${lastSeqRef.current[sessionId] ?? getModuleLive(sessionId).lastSeq ?? 0}`, { sessionId, streamSession: streamSessionRef.current, busyRef: busyRef.current });
       // Don't double-attach if we're already streaming this session.
       if (streamSessionRef.current === sessionId && busyRef.current) return;
+      // Serialize concurrent reattaches: if one is already in flight for this
+      // session, drop the duplicate. This also fixes the since=3/since=7 race
+      // — the blocked caller never issues a second GET /events, so the cursor
+      // can't be double-read.
+      const inflight = reattachInflight.current;
+      if (inflight.has(sessionId)) return;
+      // No-op cooldown: skip reattach if we already found nothing <30s ago.
+      if (Date.now() - (reattachNoopAt.current[sessionId] ?? 0) < 30_000) return;
+      inflight.add(sessionId);
       try {
         const m = getModuleLive(sessionId);
         const profileQs = profile ? `&profile=${encodeURIComponent(profile)}` : "";
@@ -1889,6 +1907,9 @@ export default function ChatPage() {
           // busy flag and reconcile the final answer from the server.
           setBusy(false);
           m.busy = false;
+          // Remember this no-op so the 15s poll doesn't immediately re-fire
+          // reattach for a run that already finished (hammer-loop fix).
+          reattachNoopAt.current[sessionId] = Date.now();
           const now = Date.now();
           setLive((p) => {
             const stillPending = p.tools.some((t) => t.durationMs === undefined);
@@ -1912,6 +1933,8 @@ export default function ChatPage() {
         dbg("reattach", `events stream ABORTED/ERROR`, { sessionId });
         setBusy(false);
         streamSessionRef.current = null;
+      } finally {
+        inflight.delete(sessionId);
       }
     },
     [loadMessages, profile]
