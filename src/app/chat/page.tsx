@@ -939,6 +939,11 @@ export default function ChatPage() {
       // correctly instead of reading the stale rendered snapshot each time.
       let chain: ChainSegment[] = [];
       let full = "";
+      // Frozen snapshot of the final message's ordered chain, built at
+      // assistant.completed and re-applied at run.completed (with settled
+      // tools) so the message's chips never show a stale spinner.
+      let finalSegments: ChatSegment[] = [];
+      let finalToolCalls: ToolCallInfo[] = [];
       let runUsage: RunStats["usage"] = null;
       let runRuntime: RunStats["runtime"] = null;
       let startedAt = Date.now();
@@ -1200,17 +1205,32 @@ export default function ChatPage() {
                 if (content) {
                   full = content;
                   setStreamedText(content);
+                  // Settle any tool that hasn't received its completion yet —
+                  // tool.completed frames can race behind assistant.completed.
+                  // Freeze the FINAL message with settled tools so its chips
+                  // never render a spinner that can no longer be updated.
+                  const settleMs = Date.now();
+                  toolEvents = toolEvents.map((t) =>
+                    t.durationMs === undefined
+                      ? { ...t, durationMs: Math.max(1, settleMs - (t.startedAt ?? settleMs)), error: t.error ?? false }
+                      : t
+                  );
+                  chain = chain.map((c) =>
+                    c.kind === "tool" && c.tool.durationMs === undefined
+                      ? { ...c, tool: { ...c.tool, durationMs: Math.max(1, settleMs - (c.tool.startedAt ?? settleMs)), error: c.tool.error ?? false } }
+                      : c
+                  );
                   // Build the FINAL message with the full ordered chain
                   // (reasoning + tools interleaved) so the bubble keeps the
                   // tool calls after the run — and the live bubble stops
                   // rendering (phase done + busy false) so the reply never
                   // appears twice.
-                  const finalSegments: ChatSegment[] = chain.map((c) =>
+                  finalSegments = chain.map((c) =>
                     c.kind === "reasoning"
                       ? { kind: "reasoning" as const, text: c.text }
                       : { kind: "tools" as const, calls: [{ name: c.tool.name, args: c.tool.args, result: undefined, error: c.tool.error, durationMs: c.tool.durationMs }] }
                   );
-                  const finalToolCalls: ToolCallInfo[] = toolEvents.map((t) => ({
+                  finalToolCalls = toolEvents.map((t) => ({
                     name: t.name,
                     args: t.args,
                     result: undefined,
@@ -1279,6 +1299,27 @@ export default function ChatPage() {
                     runtime: runRuntime,
                   },
                 });
+                // Re-apply the settled chain to the final message — the
+                // snapshot frozen at assistant.completed already has settled
+                // tools, but if any tool.completed frame arrived between,
+                // refresh the chips with the latest durations/errors so the
+                // message NEVER shows a spinner that can't update.
+                if (finalSegments.length > 0 || finalToolCalls.length > 0) {
+                  setMessages((prev) => {
+                    const copy = [...prev];
+                    for (let i = copy.length - 1; i >= 0; i--) {
+                      if (copy[i].role === "assistant") {
+                        copy[i] = {
+                          ...copy[i],
+                          segments: finalSegments.length > 0 ? finalSegments : copy[i].segments,
+                          toolCalls: finalToolCalls.length > 0 ? finalToolCalls : copy[i].toolCalls,
+                        };
+                        break;
+                      }
+                    }
+                    return copy;
+                  });
+                }
                 // Attach per-message stats to the final assistant bubble so the
                 // model + token count show at the end of the message (replaces
                 // the old persistent footer bar).
