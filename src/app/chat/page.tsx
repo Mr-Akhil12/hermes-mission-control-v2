@@ -17,6 +17,7 @@ import { MessageSkeleton, SessionListSkeleton } from "@/components/chat/Skeleton
 import { BrowserView } from "@/components/chat/BrowserView";
 import { ChainView } from "@/components/chat/ChainView";
 import { DEFAULT_MODEL as MODEL } from "@/lib/models";
+import { dbg, toolSnap, liveSnap } from "@/lib/chat-debug";
 
 type LiveState = {
   phase: RunPhase;
@@ -75,6 +76,7 @@ function bumpRunGen(sessionId: string | null | undefined): void {
   if (!sessionId) return;
   moduleRunGen[sessionId] = (moduleRunGen[sessionId] ?? 0) + 1;
   moduleFinalAppended[sessionId] = false;
+  dbg("gen", `bumpRunGen gen=${moduleRunGen[sessionId]} finalAppended=false`, { sessionId });
 }
 
 function isFinalAppendedForCurrentRun(sessionId: string | null | undefined): boolean {
@@ -82,7 +84,9 @@ function isFinalAppendedForCurrentRun(sessionId: string | null | undefined): boo
   const gen = moduleRunGen[sessionId];
   // No generation recorded yet (nothing ran) → nothing appended.
   if (gen === undefined) return false;
-  return moduleFinalAppended[sessionId] === true;
+  const v = moduleFinalAppended[sessionId] === true;
+  dbg("gen", `isFinalAppended gen=${gen} finalAppended=${moduleFinalAppended[sessionId]} -> ${v}`, { sessionId });
+  return v;
 }
 
 function getModuleLive(sessionId: string): ModuleLiveState {
@@ -123,11 +127,13 @@ function appendReasoningToChain(chain: ChainSegment[], delta: string): ChainSegm
 // completion keeps its error bit.
 function settleTool(t: ToolEvent, now: number): ToolEvent {
   if (t.durationMs !== undefined) return t;
-  return {
+  const s = {
     ...t,
     durationMs: Math.max(1, now - (t.startedAt ?? now)),
     interrupted: t.error === undefined,
   };
+  dbg("settle", `settleTool '${t.name}' durationMs=${s.durationMs} interrupted=${s.interrupted}`, toolSnap(s));
+  return s;
 }
 
 function settleToolInChain(c: ChainSegment, now: number): ChainSegment {
@@ -143,7 +149,9 @@ function settleToolInChain(c: ChainSegment, now: number): ChainSegment {
 function settleLiveState(live: LiveState, now = Date.now()): LiveState {
   const tools = live.tools.map((t) => settleTool(t, now));
   const chain = live.chain.map((c) => settleToolInChain(c, now));
-  return { ...live, tools, chain, phase: "done" };
+  const next = { ...live, tools, chain, phase: "done" as const };
+  dbg("settle", "settleLiveState -> done", { before: liveSnap(live), after: liveSnap(next) });
+  return next;
 }
 
 export default function ChatPage() {
@@ -242,6 +250,7 @@ export default function ChatPage() {
       const res = await fetch(`/api/chat/sessions/${id}/messages${profileQs}`, { cache: "no-store" });
       const data = await res.json();
       const list = data?.data ?? [];
+      dbg("loadMessages", `GET /messages rows=${list.length} http=${res.status} profile=${profile ?? "default"}`, { sessionId: id });
       const modelName = MODEL;
       // The Hermes API persists each assistant fragment as its own row —
       // thinking text between tool calls, empty frames, and the final reply.
@@ -417,7 +426,13 @@ export default function ChatPage() {
         msgs.push(pending);
       }
       setMessages(msgs);
+      dbg("loadMessages", `merged rows=${list.length} -> msgs=${msgs.length} toolResults=${toolResults.size}`, {
+        sessionId: id,
+        assistantMsgs: msgs.filter((m) => m.role === "assistant").length,
+        toolMsgs: msgs.filter((m) => m.role === "assistant" && (m.toolCalls?.length ?? 0) > 0).length,
+      });
     } catch (e) {
+      dbg("loadMessages", `FAILED ${e instanceof Error ? e.message : e}`, { sessionId: id });
       setError(`Failed to load messages: ${e instanceof Error ? e.message : e}`);
     } finally {
       setMessagesLoading(false);
@@ -896,6 +911,7 @@ export default function ChatPage() {
     async (text: string) => {
       let trimmed = text.trim();
       if (!trimmed) return;
+      dbg("send", `send("${trimmed.slice(0, 120)}") busyRef=${busyRef.current}`, { sessionId: activeId });
 
       // Lazy session creation: if there's no active session yet (fresh
       // "New conversation" that hasn't been typed into), create it now —
@@ -1047,6 +1063,11 @@ export default function ChatPage() {
       // JSON.parse — in that case the local list is missing the answer, so the
       // safety-net reload below must still fire.
       let assistantAppended = false;
+      // Stall watchdog shared between the try (timer + read loop) and the
+      // finally block (debug reporting): no SSE event for 180s flags the run
+      // as stalled so the finally can explain WHY it dropped the stream.
+      let lastEventAt = Date.now();
+      let stalled = false;
 
       const bumpLive = (patch: Partial<LiveState>) => {
         setLive((prev) => {
@@ -1073,6 +1094,7 @@ export default function ChatPage() {
           body: JSON.stringify({ message: trimmed, model: MODEL, profile }),
           signal: abort.signal,
         });
+        dbg("stream", `POST /stream http=${res.status}`, { sessionId, msgLen: trimmed.length });
         if (!res.ok || !res.body) {
           const text = await res.text().catch(() => "");
           throw new Error(text || `Chat failed (${res.status})`);
@@ -1086,8 +1108,8 @@ export default function ChatPage() {
         // lives on the laptop and keeps going. Just drop this read loop so
         // the finally block reattaches (replays from the saved seq) instead
         // of killing the stream. The browser is a view, not the owner.
-        let lastEventAt = Date.now();
-        let stalled = false;
+        lastEventAt = Date.now();
+        stalled = false;
         const stallTimer = setInterval(() => {
           if (Date.now() - lastEventAt > 180_000) {
             stalled = true;
@@ -1137,14 +1159,17 @@ export default function ChatPage() {
                 runRuntime = (payload as any).runtime ?? null;
                 bumpLive({ phase: "initializing", stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), runtime: runRuntime } });
                 // brief "initializing" beat then move to thinking as events flow
+                dbg("sse", `run.started runtime=${runRuntime ?? "?"}`, { sessionId });
                 break;
               }
               case "message.started": {
                 bumpLive({ phase: "thinking" });
+                dbg("sse", "message.started -> phase=thinking", { sessionId });
                 break;
               }
               case "assistant.delta": {
                 const delta = (payload as any).delta ?? "";
+                dbg("sse", `assistant.delta len=${delta.length} fullLen=${full.length + delta.length}`, { sessionId });
                 if (delta) {
                   full += delta;
                   // Stream ONLY into the live bubble — do NOT append to the
@@ -1181,6 +1206,8 @@ export default function ChatPage() {
               case "tool.progress": {
                 const tname = (payload as any).tool_name ?? "_thinking";
                 const delta = (payload as any).delta ?? "";
+                const isBeat = !!(payload as any).beat;
+                dbg("sse", `tool.progress name=${tname} beat=${isBeat} delta=${delta.length}`, { sessionId, phase: liveRef.current.phase });
                 if (tname === "_thinking") {
                   if (delta) {
                     reasoning += delta;
@@ -1200,6 +1227,7 @@ export default function ChatPage() {
                   if (exists) {
                     const beatPreview = (payload as any).preview;
                     if (beatPreview && exists.preview !== beatPreview) {
+                      dbg("beat", `refresh preview '${tname}': "${(exists.preview ?? "").slice(0, 60)}" -> "${beatPreview.slice(0, 60)}"`, { sessionId, elapsed: Math.round((Date.now() - exists.startedAt) / 1000) });
                       toolEvents = toolEvents.map((t) => (t === exists ? { ...t, preview: beatPreview } : t));
                       chain = chain.map((c) =>
                         c.kind === "tool" && c.tool === exists ? { ...c, tool: { ...c.tool, preview: beatPreview } } : c
@@ -1229,6 +1257,7 @@ export default function ChatPage() {
               }
               case "tool.started": {
                 const tname = (payload as any).tool_name ?? "tool";
+                dbg("sse", `tool.started name=${tname}`, { sessionId, phase: liveRef.current.phase });
                 if (tname === "_thinking") break;
                 const exists = toolEvents.find((t) => t.name === tname && t.durationMs === undefined);
                 let te: ToolEvent | null = null;
@@ -1270,6 +1299,7 @@ export default function ChatPage() {
                 const tname = (payload as any).tool_name ?? "tool";
                 const isErr = !!(payload as any).is_error;
                 const durMs = (payload as any).duration !== undefined ? (payload as any).duration * 1000 : Date.now() - (toolEvents.find((t) => t.name === tname)?.startedAt ?? Date.now());
+                dbg("sse", `tool.completed name=${tname} err=${isErr} durMs=${Math.round(durMs)}`, { sessionId });
                 toolEvents = toolEvents.map((t) =>
                   t.name === tname && t.durationMs === undefined
                     ? { ...t, durationMs: durMs, error: isErr }
@@ -1287,6 +1317,7 @@ export default function ChatPage() {
               }
               case "tool.failed": {
                 const tname = (payload as any).tool_name ?? "tool";
+                dbg("sse", `tool.failed name=${tname}`, { sessionId });
                 toolEvents = toolEvents.map((t) =>
                   t.name === tname && t.durationMs === undefined
                     ? { ...t, durationMs: Date.now() - t.startedAt, error: true }
@@ -1303,6 +1334,7 @@ export default function ChatPage() {
               }
               case "assistant.completed": {
                 const content = (payload as any).content;
+                dbg("sse", `assistant.completed contentLen=${content?.length ?? 0} tools=${toolEvents.length}`, { sessionId, toolCount, failedCount });
                 if (content) {
                   full = content;
                   setStreamedText(content);
@@ -1364,6 +1396,7 @@ export default function ChatPage() {
                 runUsage = (payload as any).usage ?? null;
                 runRuntime = (payload as any).runtime ?? runRuntime;
                 completedCleanly = true;
+                dbg("sse", `run.completed usage=${JSON.stringify(runUsage)?.slice(0, 120)}`, { sessionId, toolCount, failedCount, assistantAppended });
                 const completedAt = Date.now();
                 // Settle any tool still showing a spinner — a clean
                 // run.completed means every tool finished; mark them done
@@ -1451,6 +1484,7 @@ export default function ChatPage() {
         // state was already saved in liveBySessionRef when they navigated away.
         // reattachRun restores it when they come back.
         const stillViewing = activeIdRef.current === sessionId;
+        dbg("stream", `stream closed (finally) stillViewing=${stillViewing} completedCleanly=${completedCleanly} assistantAppended=${assistantAppended} stalled=${stalled}`, { sessionId, toolCount, failedCount, lastEventAgoMs: Date.now() - lastEventAt });
         setBusy(false);
         if (stillViewing) setStreamedText("");
         if (sessionId) {
@@ -1482,6 +1516,7 @@ export default function ChatPage() {
         if (stillViewing) {
           setLive((prev) => {
             const settled = settle(prev);
+            dbg("settle", "finally settle (stillViewing)", { before: liveSnap(prev), after: liveSnap(settled) });
             // Persist the last run's stats so the permanent footer keeps showing
             // them after the run settles (idle state otherwise clears them).
             if (settled.stats) setLastStats(settled.stats);
@@ -1497,7 +1532,9 @@ export default function ChatPage() {
           // User navigated away mid-run — settle the module snapshot so
           // returning never shows infinite spinners.
           const m = getModuleLive(sessionId);
+          dbg("settle", "finally settle (navigated away — module snapshot)", { sessionId, before: liveSnap(m.live) });
           m.live = settle(m.live);
+          dbg("settle", "module settled", { sessionId, after: liveSnap(m.live) });
           m.streamSession = null;
           liveBySessionRef.current[sessionId] = { live: m.live, streamedText: m.streamedText };
         }
@@ -1508,6 +1545,7 @@ export default function ChatPage() {
         // refresh" feel on mobile). Skip it for a clean completion.
         if (!completedCleanly || !assistantAppended) {
           try {
+            dbg("stream", "safety-net loadMessages (tail dropped or answer missing)", { sessionId, completedCleanly, assistantAppended });
             if (sessionId) await loadMessages(sessionId);
           } catch {
             /* best-effort */
@@ -1565,6 +1603,7 @@ export default function ChatPage() {
   const reattachRun = useCallback(
     async (sessionId: string) => {
       if (!sessionId) return;
+      dbg("reattach", `reattachRun START since=${lastSeqRef.current[sessionId] ?? getModuleLive(sessionId).lastSeq ?? 0}`, { sessionId, streamSession: streamSessionRef.current, busyRef: busyRef.current });
       // Don't double-attach if we're already streaming this session.
       if (streamSessionRef.current === sessionId && busyRef.current) return;
       try {
@@ -1573,6 +1612,7 @@ export default function ChatPage() {
         const res = await fetch(`/api/chat/sessions/${sessionId}/events?since=${lastSeqRef.current[sessionId] ?? m.lastSeq ?? 0}${profileQs}`, {
           cache: "no-store",
         });
+        dbg("reattach", `GET /events http=${res.status}`, { sessionId, since: lastSeqRef.current[sessionId] ?? m.lastSeq ?? 0 });
         if (!res.ok || !res.body) return;
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
@@ -1608,6 +1648,7 @@ export default function ChatPage() {
             // pre-existing state and go busy.
             if (!livePhase) {
               livePhase = true;
+              dbg("reattach", `first frame event=${payload.event} seq=${payload.seq} — restoring live state`, { sessionId });
               setBusy(true);
               m.busy = true;
               const prev = liveBySessionRef.current[sessionId]?.live ?? m.live;
@@ -1811,6 +1852,7 @@ export default function ChatPage() {
         // Stream closed. If the run was live, reconcile from the server so
         // nothing is lost; otherwise this was a finished/rotated run — either
         // way release the attach marker so future reattaches aren't blocked.
+        dbg("reattach", `events stream closed livePhase=${livePhase}`, { sessionId });
         if (livePhase) {
           setBusy(false);
           m.busy = false;
@@ -1867,6 +1909,7 @@ export default function ChatPage() {
       } catch {
         // Aborted (new send started) or transient — the 15s session poll
         // will re-trigger reattach if the run is still live.
+        dbg("reattach", `events stream ABORTED/ERROR`, { sessionId });
         setBusy(false);
         streamSessionRef.current = null;
       }
@@ -1879,6 +1922,7 @@ export default function ChatPage() {
   // appears active in the poll while this client isn't attached.
   const visibilityHandler = useCallback(() => {
     if (document.visibilityState === "visible" && activeId) {
+      dbg("nav", `visibilitychange -> visible activeId=${activeId} busy=${busyRef.current} streamSession=${streamSessionRef.current}`);
       const sess = sessions.find((s) => s.id === activeId);
       const snap = moduleLive[activeId];
       const snapActive = snap && snap.live.phase !== "idle" && snap.live.phase !== "done";
@@ -2016,6 +2060,7 @@ export default function ChatPage() {
     // (or from another device). Blocking on `busy` is what made the sidebar
     // feel dead during work (the old `if (busy) return`).
     if (id === activeId) return;
+    dbg("nav", `selectSession -> ${id} (was ${activeId})`, { busy: busyRef.current, streamSession: streamSessionRef.current });
     // Preserve the unsent draft of the conversation we're leaving.
     if (activeId) draftsRef.current[activeId] = input;
     // Save the current session's live state so we can restore it when the
