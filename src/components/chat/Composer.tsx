@@ -7,6 +7,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { Mic, MicOff, Send, Square, Maximize2, Minimize2, Volume2, Paperclip, X } from "lucide-react";
 import { SlashAutocomplete } from "./SlashAutocomplete";
+import { dbg } from "@/lib/chat-debug";
 
 // An attachment the user picked in the composer — not yet uploaded.
 export type PendingAttachment = {
@@ -18,11 +19,12 @@ export type PendingAttachment = {
 
 export const Composer = memo(function Composer({
   input,
+  draftKey,
   setInput,
+  onDraftChange,
   send,
   busy,
   stopRun,
-  activeId,
   listening,
   toggleMic,
   composerExpanded,
@@ -33,11 +35,12 @@ export const Composer = memo(function Composer({
   setAttachments,
 }: {
   input: string;
+  draftKey: string;
   setInput: (v: string) => void;
+  onDraftChange: (v: string) => void;
   send: (text: string) => void;
   busy: boolean;
   stopRun: () => void;
-  activeId: string | null;
   listening: boolean;
   toggleMic: () => void;
   composerExpanded: boolean;
@@ -50,7 +53,19 @@ export const Composer = memo(function Composer({
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
+  // Keep high-frequency typing local. The page owns the durable per-session
+  // draft, but only receives it on send/expand or an external draft change;
+  // a keystroke no longer reconciles the sidebar + transcript + live chain.
+  const [localInput, setLocalInput] = useState(input);
   const dropCount = useRef(0);
+
+  useEffect(() => {
+    setLocalInput(input);
+  }, [input, draftKey]);
+
+  useEffect(() => {
+    dbg("render", `Composer commit draftKey=${draftKey} chars=${localInput.length} busy=${busy}`);
+  });
 
   // Auto-resize the composer textarea to fit its content (wraps after one
   // line, grows up to a cap). Collapses back to a single line when cleared.
@@ -59,7 +74,7 @@ export const Composer = memo(function Composer({
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
-  }, [input]);
+  }, [localInput]);
 
   // Shared file→attachment pipeline (click picker + drag-drop).
   const addFiles = (files: FileList | File[]) => {
@@ -83,8 +98,10 @@ export const Composer = memo(function Composer({
     )
       .then((items) => {
         setAttachments((prev) => [...prev, ...items]);
-        if (oversized > 0 && !input.trim()) {
-          setInput(`⚠️ ${oversized} file(s) skipped (max 20MB). `);
+        if (oversized > 0 && !localInput.trim()) {
+          const warning = `⚠️ ${oversized} file(s) skipped (max 20MB). `;
+          setLocalInput(warning);
+          onDraftChange(warning);
         }
       })
       .catch(() => {});
@@ -124,7 +141,10 @@ export const Composer = memo(function Composer({
       }}
       onDrop={onDrop}
     >
-      <SlashAutocomplete input={input} onApply={setInput} />
+      <SlashAutocomplete input={localInput} onApply={(value) => {
+        setLocalInput(value);
+        onDraftChange(value);
+      }} />
       <input
         ref={fileRef}
         type="file"
@@ -179,13 +199,19 @@ export const Composer = memo(function Composer({
       )}
       <textarea
         ref={composerRef}
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
+        value={localInput}
+        onChange={(e) => {
+          setLocalInput(e.target.value);
+          onDraftChange(e.target.value);
+        }}
         onKeyDown={(e) => {
           // Enter sends; Shift+Enter inserts a newline.
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
-            send(input);
+            setInput(localInput);
+            send(localInput);
+            setLocalInput("");
+            onDraftChange("");
           }
         }}
         rows={1}
@@ -195,7 +221,10 @@ export const Composer = memo(function Composer({
         style={{ borderColor: "var(--card-border)", color: "var(--text)", maxHeight: 120 }}
       />
       <button
-        onClick={() => setComposerExpanded((v) => !v)}
+        onClick={() => {
+          setInput(localInput);
+          setComposerExpanded((v) => !v);
+        }}
         disabled={false}
         className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border disabled:opacity-40"
         style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}
@@ -205,8 +234,17 @@ export const Composer = memo(function Composer({
         {composerExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
       </button>
       <button
-        onClick={() => (busy ? stopRun() : send(input))}
-        disabled={!busy && !input.trim()}
+        onClick={() => {
+          if (busy) {
+            stopRun();
+          } else {
+            setInput(localInput);
+            send(localInput);
+            setLocalInput("");
+            onDraftChange("");
+          }
+        }}
+        disabled={!busy && !localInput.trim()}
         className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-white disabled:opacity-50"
         style={{ background: busy ? "rgba(255,92,92,0.85)" : "linear-gradient(135deg, var(--accent), var(--accent-2))" }}
         aria-label={busy ? "Stop" : "Send"}

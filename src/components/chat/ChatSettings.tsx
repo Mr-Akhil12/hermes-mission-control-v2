@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { Settings2, Brain, Wrench, BarChart3 } from "lucide-react";
 import type { ChatSettings } from "@/lib/chat-types";
 
@@ -45,7 +45,7 @@ const TOOL_OPTIONS: Option<ChatSettings["tools"]>[] = [
   { value: "count", label: "Count only", hint: "Just a running tool counter" },
 ];
 
-export function ChatSettingsButton({
+export const ChatSettingsButton = memo(function ChatSettingsButton({
   settings,
   onChange,
 }: {
@@ -189,4 +189,4 @@ export function ChatSettingsButton({
       )}
     </div>
   );
-}
+});

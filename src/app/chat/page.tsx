@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
   Send, Mic, MicOff, Volume2, MessageSquare, Plus, ChevronLeft, ChevronRight,
   Loader2, Trash2, Pencil, Square, CheckSquare, X, Maximize2, Minimize2, Bot,
@@ -71,6 +71,81 @@ const moduleFinalAppended: Record<string, boolean> = {};
 // bubble — a stale `true` from a previous run on this session must not hide a
 // new run's live reasoning.
 const moduleRunGen: Record<string, number> = {};
+
+// A module snapshot covers SPA navigation, but an installed PWA can be fully
+// killed between frames. localStorage is intentionally used instead of
+// sessionStorage: mobile browsers may discard the browsing session when the
+// standalone app is closed. Only the currently selected conversation is
+// retained, bounded by the browser's origin quota and expired after 24 hours.
+const CHAT_RESUME_KEY = "hermes-chat-resume-v2";
+const CHAT_RESUME_TTL_MS = 24 * 60 * 60 * 1000;
+
+type PersistedChatResume = {
+  version: 2;
+  savedAt: number;
+  sessionId: string;
+  profile: string;
+  messages: ChatMsg[];
+  snapshot: ModuleLiveState;
+  finalAppended: boolean;
+  runGen: number;
+};
+
+function readPersistedChatResume(): PersistedChatResume | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(CHAT_RESUME_KEY) ?? "null") as PersistedChatResume | null;
+    if (
+      !parsed ||
+      parsed.version !== 2 ||
+      !parsed.sessionId ||
+      Date.now() - parsed.savedAt > CHAT_RESUME_TTL_MS
+    ) {
+      window.localStorage.removeItem(CHAT_RESUME_KEY);
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function persistChatResume(
+  sessionId: string,
+  profile: string,
+  messages: ChatMsg[],
+  live: LiveState,
+  streamedText: string,
+  busy: boolean
+): void {
+  if (typeof window === "undefined") return;
+  const current = getModuleLive(sessionId);
+  const snapshot: ModuleLiveState = {
+    live,
+    streamedText,
+    busy,
+    streamSession: busy ? sessionId : null,
+    lastSeq: lastSeqState[sessionId] ?? current.lastSeq ?? 0,
+  };
+  moduleLive[sessionId] = snapshot;
+  try {
+    window.localStorage.setItem(
+      CHAT_RESUME_KEY,
+      JSON.stringify({
+        version: 2,
+        savedAt: Date.now(),
+        sessionId,
+        profile,
+        messages,
+        snapshot,
+        finalAppended: moduleFinalAppended[sessionId] === true,
+        runGen: moduleRunGen[sessionId] ?? 0,
+      } satisfies PersistedChatResume)
+    );
+  } catch {
+    // Storage quota/private mode: module scope still preserves SPA returns.
+  }
+}
 
 function bumpRunGen(sessionId: string | null | undefined): void {
   if (!sessionId) return;
@@ -154,6 +229,43 @@ function settleLiveState(live: LiveState, now = Date.now()): LiveState {
   return next;
 }
 
+// The persisted transcript is the heaviest subtree on this page. It changes
+// only when a message is added/reconciled or display settings change — never
+// for keystrokes, elapsed ticks, reasoning deltas, or streamed answer deltas.
+const MessageHistory = memo(function MessageHistory({
+  messages,
+  messagesLoading,
+  busy,
+  settings,
+}: {
+  messages: ChatMsg[];
+  messagesLoading: boolean;
+  busy: boolean;
+  settings: ChatSettings;
+}) {
+  useEffect(() => {
+    dbg("render", `MessageHistory commit messages=${messages.length} loading=${messagesLoading} busy=${busy}`);
+  });
+
+  if (messagesLoading) return <MessageSkeleton />;
+  if (messages.length === 0 && !busy) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 text-sm" style={{ color: "var(--text-faint)" }}>
+        <MessageSquare className="h-8 w-8 opacity-40" />
+        <span>Ask me anything — type below or tap the mic to speak.</span>
+        <span className="font-mono text-xs opacity-60">Tip: type <span style={{ color: "var(--accent)" }}>/</span> for commands</span>
+      </div>
+    );
+  }
+  return (
+    <>
+      {messages.map((message, index) => (
+        <MessageBubble key={`${message.role}-${index}`} msg={message} settings={settings} />
+      ))}
+    </>
+  );
+});
+
 export default function ChatPage() {
   const [error, setError] = useState<string | null>(null);
   const {
@@ -216,6 +328,47 @@ export default function ChatPage() {
   // created via `hermes profile create` — e.g. ox-alpha). Merged with the
   // static fallback list; deduped by id, live list wins.
   const [extraProfiles, setExtraProfiles] = useState<ChatProfile[]>([]);
+  const [restoreReady, setRestoreReady] = useState(false);
+  const restoredSessionIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    dbg("render", `ChatPage commit active=${activeId ?? "new"} messages=${messages.length} busy=${busy} phase=${live.phase}`);
+  });
+
+  // Cold-start restore for an installed PWA. Hydrate the selected transcript,
+  // live chain, text, phase, and seq cursor before any network reconciliation;
+  // the first painted client state is therefore the state the user left.
+  useEffect(() => {
+    const resume = readPersistedChatResume();
+    if (resume) {
+      restoredSessionIdRef.current = resume.sessionId;
+      moduleLive[resume.sessionId] = resume.snapshot;
+      lastSeqState[resume.sessionId] = resume.snapshot.lastSeq;
+      moduleFinalAppended[resume.sessionId] = resume.finalAppended;
+      moduleRunGen[resume.sessionId] = resume.runGen;
+      liveBySessionRef.current[resume.sessionId] = {
+        live: resume.snapshot.live,
+        streamedText: resume.snapshot.streamedText,
+      };
+      setProfile(resume.profile);
+      setActiveId(resume.sessionId);
+      setMessages(resume.messages);
+      setMessagesLoading(false);
+      setLive(resume.snapshot.live);
+      setStreamedText(resume.snapshot.streamedText);
+      setLastStats(resume.snapshot.live.stats);
+      const resumableBusy =
+        resume.snapshot.busy &&
+        resume.snapshot.live.phase !== "idle" &&
+        resume.snapshot.live.phase !== "done" &&
+        resume.snapshot.live.phase !== "error";
+      setBusy(resumableBusy);
+      // A network reader cannot survive a process close. Keep the visual busy
+      // state, but force reattachRun to establish a fresh reader from lastSeq.
+      streamSessionRef.current = null;
+    }
+    setRestoreReady(true);
+  }, [setActiveId, setProfile]);
 
   // Load display settings once.
   useEffect(() => {
@@ -278,8 +431,27 @@ export default function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId]);
 
-  const loadMessages = useCallback(async (id: string) => {
-    setMessagesLoading(true);
+  // Persist at most once per burst of SSE/UI updates. pagehide and hidden
+  // visibility flush synchronously so the last delta/seq survives an app kill.
+  useEffect(() => {
+    if (!restoreReady || !activeId) return;
+    const flush = () => persistChatResume(activeId, profile, messages, live, streamedText, busy);
+    const timer = window.setTimeout(flush, 80);
+    const onPageHide = () => flush();
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    window.addEventListener("pagehide", onPageHide);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("pagehide", onPageHide);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [restoreReady, activeId, profile, messages, live, streamedText, busy]);
+
+  const loadMessages = useCallback(async (id: string, showLoading = true) => {
+    if (showLoading) setMessagesLoading(true);
     try {
       const profileQs = profile ? `?profile=${encodeURIComponent(profile)}` : "";
       const res = await fetch(`/api/chat/sessions/${id}/messages${profileQs}`, { cache: "no-store" });
@@ -473,24 +645,31 @@ export default function ChatPage() {
         assistantMsgs: msgs.filter((m) => m.role === "assistant").length,
         toolMsgs: msgs.filter((m) => m.role === "assistant" && (m.toolCalls?.length ?? 0) > 0).length,
       });
+      return msgs;
     } catch (e) {
       dbg("loadMessages", `FAILED ${e instanceof Error ? e.message : e}`, { sessionId: id });
       setError(`Failed to load messages: ${e instanceof Error ? e.message : e}`);
+      return [] as ChatMsg[];
     } finally {
-      setMessagesLoading(false);
+      if (showLoading) setMessagesLoading(false);
     }
   }, [profile]);
 
   useEffect(() => {
+    if (!restoreReady) return;
     const resumeId = new URLSearchParams(window.location.search).get("resume");
-    loadSessions(resumeId ? "all" : undefined).then((list) => {
+    const persistedId = restoredSessionIdRef.current;
+    const requestedId = resumeId ?? persistedId;
+    loadSessions(requestedId ? "all" : undefined).then((list) => {
       // If arriving via a Resume link (e.g. from /sessions), open that exact
       // session instead of the default most-recent one. Load with source=all
       // so cron/subagent sessions (not in the dashboard filter) resolve too.
-      const target = resumeId ? list.find((s) => s.id === resumeId) : undefined;
+      const target = requestedId ? list.find((s) => s.id === requestedId) : undefined;
       if (target) {
         setActiveId(target.id);
-        loadMessages(target.id);
+        // The persisted transcript is already visible. Reconcile silently so
+        // returning never flashes a skeleton over an intact conversation.
+        loadMessages(target.id, target.id !== persistedId);
       } else if (list.length > 0) {
         setActiveId(list[0].id);
         loadMessages(list[0].id);
@@ -498,7 +677,7 @@ export default function ChatPage() {
         setMessagesLoading(false);
       }
     });
-  }, [loadSessions, loadMessages]);
+  }, [restoreReady, loadSessions, loadMessages, setActiveId]);
 
   // Poll the session list every 15s so the "Working…" dots on active
   // conversations stay live — including sessions running in the background
@@ -513,14 +692,16 @@ export default function ChatPage() {
   // Live elapsed timer — ticks every second while a run is active so the UI
   // always shows progress, even during quiet tool calls / model thinking.
   useEffect(() => {
-    if (!busy) return;
-    setElapsedSec(0);
-    const started = Date.now();
-    const t = setInterval(() => {
-      setElapsedSec(Math.floor((Date.now() - started) / 1000));
-    }, 1000);
+    if (!busy) {
+      setElapsedSec(0);
+      return;
+    }
+    const started = live.stats?.startedAt ?? Date.now();
+    const tick = () => setElapsedSec(Math.max(0, Math.floor((Date.now() - started) / 1000)));
+    tick();
+    const t = setInterval(tick, 1000);
     return () => clearInterval(t);
-  }, [busy]);
+  }, [busy, live.stats?.startedAt]);
 
   const scrollToBottom = useCallback(() => {
     bottomRef.current?.scrollIntoView({ behavior: settings.autoScroll ? "smooth" : "auto" });
@@ -544,20 +725,13 @@ export default function ChatPage() {
     // first send() instead. Just clear the UI and arm the composer.
     setError(null);
     setLive(IDLE_LIVE);
-    if (activeId) {
-      draftsRef.current[activeId] = input;
-      // Leaving this session for a fresh conversation — reset its run
-      // generation so a future return to it isn't gated by a stale
-      // moduleFinalAppended=true from the previous run.
-      bumpRunGen(activeId);
-    }
     setActiveId(null);
     setMessages([]);
     setStreamedText("");
     setInput("");
     setComposerExpanded(false);
     await loadSessions();
-  }, [loadSessions, activeId, input]);
+  }, [loadSessions, setActiveId]);
 
   // ── Slash command handling ──────────────────────────────────────────
   const sendRef = useRef<((text: string) => Promise<void>) | null>(null);
@@ -695,7 +869,7 @@ export default function ChatPage() {
           // but everything they'd show lives in state we already hold.
           const sid = activeId ?? "—";
           const sess = sessions.find((s) => s.id === sid);
-          const lastStats = live.stats;
+          const lastStats = liveRef.current.stats;
           const model = lastStats?.runtime?.model ?? MODEL;
           const provider = lastStats?.runtime?.provider ?? "";
           if (cmd === "status") {
@@ -832,7 +1006,7 @@ export default function ChatPage() {
           return true;
         }
         case "usage": {
-          const lastStats = live.stats;
+          const lastStats = liveRef.current.stats;
           const inp = lastStats?.usage?.input_tokens ?? 0;
           const out = lastStats?.usage?.output_tokens ?? 0;
           const tot = lastStats?.usage?.total_tokens ?? 0;
@@ -944,7 +1118,7 @@ export default function ChatPage() {
           return true;
       }
     },
-    [activeId, retryTarget, newConversation, loadSessions, loadMessages, sessions, live, stopRun, setVoiceOn, voiceOn]
+    [activeId, retryTarget, newConversation, loadSessions, loadMessages, sessions, stopRun, setVoiceOn, voiceOn]
   );
 
   // ── Send / stream ───────────────────────────────────────────────────
@@ -1067,6 +1241,11 @@ export default function ChatPage() {
         failedCount: 0,
       });
       if (sessionId) {
+        // The primary POST reader owns this session until its finally block.
+        // Mark it explicitly so visibility/focus/session polling cannot open a
+        // concurrent /events reader and race the same seq cursor.
+        reattachAbort.current?.abort();
+        streamSessionRef.current = sessionId;
         const m = getModuleLive(sessionId);
         m.busy = true;
         m.streamSession = sessionId;
@@ -1349,15 +1528,15 @@ export default function ChatPage() {
                 const durMs = (payload as any).duration !== undefined ? (payload as any).duration * 1000 : Date.now() - (toolEvents.find((t) => t.name === tname)?.startedAt ?? Date.now());
                 dbg("sse", `tool.completed name=${tname} err=${isErr} durMs=${Math.round(durMs)}`, { sessionId });
                 toolEvents = toolEvents.map((t) =>
-                  t.name === tname && t.durationMs === undefined
-                    ? { ...t, durationMs: durMs, error: isErr }
+                  t.name === tname && (t.durationMs === undefined || t.interrupted)
+                    ? { ...t, durationMs: durMs, error: isErr, interrupted: false }
                     : t
                 );
                 if (isErr) failedCount += 1;
                 // Sync the same completion into the ordered chain's tool segment.
                 chain = chain.map((c) =>
-                  c.kind === "tool" && c.tool.name === tname && c.tool.durationMs === undefined
-                    ? { ...c, tool: { ...c.tool, durationMs: durMs, error: isErr } }
+                  c.kind === "tool" && c.tool.name === tname && (c.tool.durationMs === undefined || c.tool.interrupted)
+                    ? { ...c, tool: { ...c.tool, durationMs: durMs, error: isErr, interrupted: false } }
                     : c
                 );
                 bumpLive({ tools: toolEvents, failedCount, chain, stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
@@ -1367,14 +1546,14 @@ export default function ChatPage() {
                 const tname = (payload as any).tool_name ?? "tool";
                 dbg("sse", `tool.failed name=${tname}`, { sessionId });
                 toolEvents = toolEvents.map((t) =>
-                  t.name === tname && t.durationMs === undefined
-                    ? { ...t, durationMs: Date.now() - t.startedAt, error: true }
+                  t.name === tname && (t.durationMs === undefined || t.interrupted)
+                    ? { ...t, durationMs: Date.now() - t.startedAt, error: true, interrupted: false }
                     : t
                 );
                 failedCount += 1;
                 chain = chain.map((c) =>
-                  c.kind === "tool" && c.tool.name === tname && c.tool.durationMs === undefined
-                    ? { ...c, tool: { ...c.tool, durationMs: Date.now() - c.tool.startedAt, error: true } }
+                  c.kind === "tool" && c.tool.name === tname && (c.tool.durationMs === undefined || c.tool.interrupted)
+                    ? { ...c, tool: { ...c.tool, durationMs: Date.now() - c.tool.startedAt, error: true, interrupted: false } }
                     : c
                 );
                 bumpLive({ tools: toolEvents, failedCount, chain, stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
@@ -1452,6 +1631,19 @@ export default function ChatPage() {
                 const nowMs = Date.now();
                 toolEvents = toolEvents.map((t) => settleTool(t, nowMs));
                 chain = chain.map((c) => settleToolInChain(c, nowMs));
+                finalSegments = chain.map((c) =>
+                  c.kind === "reasoning"
+                    ? { kind: "reasoning" as const, text: c.text }
+                    : { kind: "tools" as const, calls: [{ name: c.tool.name, args: c.tool.args, result: undefined, error: c.tool.error, durationMs: c.tool.durationMs, interrupted: c.tool.interrupted }] }
+                );
+                finalToolCalls = toolEvents.map((t) => ({
+                  name: t.name,
+                  args: t.args,
+                  result: undefined,
+                  error: t.error,
+                  durationMs: t.durationMs,
+                  interrupted: t.interrupted,
+                }));
                 bumpLive({
                   phase: "done",
                   tools: toolEvents,
@@ -1537,6 +1729,9 @@ export default function ChatPage() {
         if (stillViewing) setStreamedText("");
         if (sessionId) {
           getModuleLive(sessionId).busy = false;
+        }
+        if (streamSessionRef.current === sessionId) {
+          streamSessionRef.current = null;
         }
         streamAbort.current = null;
         // Ensure the run settles to "done" even if the SSE tail (run.completed
@@ -1629,7 +1824,7 @@ export default function ChatPage() {
         }
       }
     },
-    [busy, activeId, voiceOn, loadSessions, loadMessages, handleSlash, profile]
+    [activeId, voiceOn, loadSessions, loadMessages, handleSlash, profile, attachments]
   );
 
   sendRef.current = send;
@@ -1647,6 +1842,15 @@ export default function ChatPage() {
   // exactly as it was — no rebuild, no refresh.
   const lastSeqRef = useRef(lastSeqState);
   const reattachAbort = useRef<AbortController | null>(null);
+  // A component instance must not leave orphaned readers behind after SPA
+  // navigation. Disconnecting these browser readers does not cancel Hermes'
+  // server-side run; the next instance resumes from the persisted seq.
+  useEffect(() => {
+    return () => {
+      streamAbort.current?.abort();
+      reattachAbort.current?.abort();
+    };
+  }, []);
   // Reattach serialization: only ONE live /events subscription per session.
   // Without this, visibilitychange + mount effect + selectSession + the 15s
   // session poll fire concurrent GET /events calls that race the seq cursor
@@ -1672,11 +1876,27 @@ export default function ChatPage() {
       // No-op cooldown: skip reattach if we already found nothing <30s ago.
       if (Date.now() - (reattachNoopAt.current[sessionId] ?? 0) < 30_000) return;
       inflight.add(sessionId);
+      // Switching conversations replaces the previous tail reader. Cancelling
+      // this browser fetch only detaches the view; the laptop run keeps going.
+      reattachAbort.current?.abort();
+      const attachAbort = new AbortController();
+      reattachAbort.current = attachAbort;
+      const m = getModuleLive(sessionId);
+      // React state updaters may run after several replay frames have already
+      // been parsed. Keep a synchronous module accumulator so a burst like
+      // reasoning → tool → completion → final cannot read a stale prior frame.
+      const commitReattachLive = (update: (current: LiveState) => LiveState): LiveState => {
+        const next = update(m.live);
+        m.live = next;
+        liveBySessionRef.current[sessionId] = { live: next, streamedText: m.streamedText };
+        if (activeIdRef.current === sessionId) setLive(next);
+        return next;
+      };
       try {
-        const m = getModuleLive(sessionId);
         const profileQs = profile ? `&profile=${encodeURIComponent(profile)}` : "";
         const res = await fetch(`/api/chat/sessions/${sessionId}/events?since=${lastSeqRef.current[sessionId] ?? m.lastSeq ?? 0}${profileQs}`, {
           cache: "no-store",
+          signal: attachAbort.signal,
         });
         dbg("reattach", `GET /events http=${res.status}`, { sessionId, since: lastSeqRef.current[sessionId] ?? m.lastSeq ?? 0 });
         if (!res.ok || !res.body) return;
@@ -1712,32 +1932,30 @@ export default function ChatPage() {
             m.lastSeq = lastSeqRef.current[sessionId];
             // First real event → now we know the run is live; restore the
             // pre-existing state and go busy.
-            if (!livePhase) {
+            const terminalFrame = payload.event === "run.completed" || payload.event === "done" || payload.event === "error";
+            if (!livePhase && !terminalFrame) {
               livePhase = true;
               dbg("reattach", `first frame event=${payload.event} seq=${payload.seq} — restoring live state`, { sessionId });
               setBusy(true);
               m.busy = true;
               const prev = liveBySessionRef.current[sessionId]?.live ?? m.live;
-              if (prev && prev.phase !== "idle" && prev.phase !== "done") {
+              if (prev && prev.phase !== "idle" && prev.phase !== "done" && prev.phase !== "error") {
                 setLive(prev);
               } else {
-                setLive((p) => (p.phase === "idle" ? { ...p, phase: "thinking" } : p));
+                const resumed = { ...(prev ?? IDLE_LIVE), phase: "thinking" as const };
+                m.live = resumed;
+                setLive(resumed);
               }
             }
             if (payload.event === "run.started" || payload.event === "message.started") {
-              setLive((p) => {
-                const next = { ...p, phase: "thinking" as const };
-                m.live = next;
-                return next;
-              });
+              commitReattachLive((p) => ({ ...p, phase: "thinking" as const }));
             } else if (payload.event === "assistant.delta") {
               livePhase = true;
               const prevText = liveBySessionRef.current[sessionId]?.streamedText ?? m.streamedText ?? "";
               const text = prevText + (payload.delta ?? "");
               m.streamedText = text;
-              liveBySessionRef.current[sessionId] = { live: { ...m.live, phase: "streaming" as const }, streamedText: text };
-              setLive({ ...m.live, phase: "streaming" });
-              setStreamedText(text);
+              commitReattachLive((p) => ({ ...p, phase: "streaming" as const }));
+              if (activeIdRef.current === sessionId) setStreamedText(text);
             } else if (payload.event === "tool.started" || payload.event === "tool.progress") {
               livePhase = true;
               const tname = payload.tool_name ?? "tool";
@@ -1746,65 +1964,73 @@ export default function ChatPage() {
               if (tname === "_thinking") {
                 const delta = payload.delta ?? "";
                 if (delta) {
-                  setLive((p) => {
-                    const next = {
-                      ...p,
-                      reasoning: p.reasoning + delta,
-                      chain: appendReasoningToChain(p.chain, delta),
-                    };
-                    m.live = next;
-                    liveBySessionRef.current[sessionId] = { live: next, streamedText: m.streamedText };
-                    return next;
-                  });
+                  commitReattachLive((p) => ({
+                    ...p,
+                    reasoning: p.reasoning + delta,
+                    chain: appendReasoningToChain(p.chain, delta),
+                  }));
                 }
                 continue;
               }
-              setLive((p) => {
+              commitReattachLive((p) => {
                 const tools = [...p.tools];
                 const exists = tools.find((t) => t.name === tname && t.durationMs === undefined);
                 let te: ToolEvent;
                 if (!exists) {
-                  te = { name: tname, startedAt: Date.now() };
+                  te = {
+                    name: tname,
+                    startedAt: Date.now(),
+                    preview: payload.preview ?? undefined,
+                    args: payload.args !== undefined ? JSON.stringify(payload.args).slice(0, 2000) : undefined,
+                  };
                   tools.push(te);
                 } else {
                   te = exists;
+                  if (payload.preview !== undefined || payload.args !== undefined) {
+                    const updated = {
+                      ...exists,
+                      preview: payload.preview ?? exists.preview,
+                      args: payload.args !== undefined ? JSON.stringify(payload.args).slice(0, 2000) : exists.args,
+                    };
+                    tools[tools.indexOf(exists)] = updated;
+                    te = updated;
+                  }
                 }
-                const chainHas = p.chain.some((c) => c.kind === "tool" && c.tool === te);
-                const next = {
+                const chain = p.chain.map((c) =>
+                  c.kind === "tool" && c.tool.name === tname && c.tool.durationMs === undefined
+                    ? { ...c, tool: te }
+                    : c
+                );
+                const chainHas = chain.some((c) => c.kind === "tool" && c.tool.name === tname && c.tool.durationMs === undefined);
+                return {
                   ...p,
                   phase: "tools" as const,
                   tools,
                   toolCount: tools.length,
-                  chain: chainHas ? p.chain : [...p.chain, { kind: "tool" as const, tool: te }],
+                  chain: chainHas ? chain : [...chain, { kind: "tool" as const, tool: te }],
                 };
-                m.live = next;
-                liveBySessionRef.current[sessionId] = { live: next, streamedText: m.streamedText };
-                return next;
               });
             } else if (payload.event === "tool.completed" || payload.event === "tool.failed") {
               const tname = payload.tool_name ?? "tool";
               if (tname === "_thinking") continue;
               const isErr = payload.event === "tool.failed" || !!payload.is_error;
-              setLive((p) => {
+              commitReattachLive((p) => {
                 const tools = p.tools.map((t) =>
-                  t.name === tname && t.durationMs === undefined
-                    ? { ...t, durationMs: (payload.duration ?? 0) * 1000, error: isErr }
+                  t.name === tname && (t.durationMs === undefined || t.interrupted)
+                    ? { ...t, durationMs: (payload.duration ?? 0) * 1000, error: isErr, interrupted: false }
                     : t
                 );
                 const chain = p.chain.map((c) =>
-                  c.kind === "tool" && c.tool.name === tname && c.tool.durationMs === undefined
-                    ? { ...c, tool: { ...c.tool, durationMs: (payload.duration ?? 0) * 1000, error: isErr } }
+                  c.kind === "tool" && c.tool.name === tname && (c.tool.durationMs === undefined || c.tool.interrupted)
+                    ? { ...c, tool: { ...c.tool, durationMs: (payload.duration ?? 0) * 1000, error: isErr, interrupted: false } }
                     : c
                 );
-                const next = { ...p, tools, chain, failedCount: p.failedCount + (isErr ? 1 : 0) };
-                m.live = next;
-                liveBySessionRef.current[sessionId] = { live: next, streamedText: m.streamedText };
-                return next;
+                return { ...p, tools, chain, failedCount: p.failedCount + (isErr ? 1 : 0) };
               });
             } else if (payload.event === "assistant.completed") {
               const content = payload.content ?? "";
               if (content) {
-                setStreamedText(content);
+                if (activeIdRef.current === sessionId) setStreamedText(content);
                 m.streamedText = content;
                 // Build the settled chain snapshot exactly like the primary
                 // send() path, and set the moduleFinalAppended gate so the
@@ -1827,9 +2053,8 @@ export default function ChatPage() {
                   interrupted: t.interrupted,
                 }));
                 moduleFinalAppended[sessionId] = true;
-                m.live = { ...m.live, phase: "streaming", tools: settledTools, chain: settledChain };
-                liveBySessionRef.current[sessionId] = { live: m.live, streamedText: content };
-                setMessages((prev) => {
+                commitReattachLive((p) => ({ ...p, phase: "streaming", tools: settledTools, chain: settledChain }));
+                if (activeIdRef.current === sessionId) setMessages((prev) => {
                   const copy = [...prev];
                   const last = copy[copy.length - 1];
                   if (last?.role === "assistant") {
@@ -1843,12 +2068,12 @@ export default function ChatPage() {
             } else if (payload.event === "run.completed") {
               livePhase = false;
               const completedAt = Date.now();
-              setLive((p) => {
+              commitReattachLive((p) => {
                 // Settle any still-pending tools — the run is over.
                 const now = Date.now();
                 const tools = p.tools.map((t) => settleTool(t, now));
                 const chain = p.chain.map((c) => settleToolInChain(c, now));
-                const next: LiveState = {
+                return {
                   ...p,
                   tools,
                   chain,
@@ -1863,15 +2088,14 @@ export default function ChatPage() {
                     runtime: payload.runtime ?? null,
                   },
                 };
-                m.live = next;
-                m.busy = false;
-                m.streamSession = null;
-                liveBySessionRef.current[sessionId] = { live: next, streamedText: m.streamedText };
-                return next;
               });
-              setLastStats((prev) => ({ ...(prev ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), ...(payload.usage ? { usage: payload.usage, runtime: payload.runtime } : {}) }));
-              setBusy(false);
-              streamSessionRef.current = null;
+              m.busy = false;
+              m.streamSession = null;
+              if (activeIdRef.current === sessionId) {
+                setLastStats(m.live.stats);
+                setBusy(false);
+              }
+              if (streamSessionRef.current === sessionId) streamSessionRef.current = null;
               // Re-apply the settled chain to the appended message so its
               // chips show final durations/interrupted state (never a spinner).
               const finalSegs: ChatSegment[] = m.live.chain.map((c) =>
@@ -1887,7 +2111,7 @@ export default function ChatPage() {
                 durationMs: t.durationMs,
                 interrupted: t.interrupted,
               }));
-              if (finalSegs.length > 0 || finalTools.length > 0) {
+              if ((finalSegs.length > 0 || finalTools.length > 0) && activeIdRef.current === sessionId) {
                 setMessages((prev) => {
                   const copy = [...prev];
                   for (let i = copy.length - 1; i >= 0; i--) {
@@ -1904,13 +2128,17 @@ export default function ChatPage() {
                 });
               }
             } else if (payload.event === "done" || payload.event === "error") {
-              if (payload.event === "error") {
+              if (payload.event === "error" && activeIdRef.current === sessionId) {
                 setError(payload.error ?? payload.message ?? "Stream error");
               }
-              setBusy(false);
+              commitReattachLive((p) => ({
+                ...settleLiveState(p),
+                phase: payload.event === "error" ? "error" as const : "done" as const,
+              }));
+              if (activeIdRef.current === sessionId) setBusy(false);
               m.busy = false;
               m.streamSession = null;
-              streamSessionRef.current = null;
+              if (streamSessionRef.current === sessionId) streamSessionRef.current = null;
               livePhase = false;
             }
           }
@@ -1920,68 +2148,65 @@ export default function ChatPage() {
         // way release the attach marker so future reattaches aren't blocked.
         dbg("reattach", `events stream closed livePhase=${livePhase}`, { sessionId });
         if (livePhase) {
-          setBusy(false);
-          m.busy = false;
-          // The run may have COMPLETED while the SSE died (proxy hop drop,
-          // Vercel function limit, quiet-reasoning stall). loadMessages below
-          // fetches ground truth; if a final assistant answer exists, the run
-          // is over — settle every still-spinning live tool so the UI never
-          // shows "loading forever" for tools that already finished.
-          await loadMessages(sessionId);
-          setLive((p) => {
-            const stillPending = p.tools.some((t) => t.durationMs === undefined);
-            if (!stillPending) return p;
-            // Mark every pending tool as completed (duration unknown but done).
-            const now = Date.now();
-            const tools = p.tools.map((t) =>
-              t.durationMs === undefined
-                ? { ...t, durationMs: Math.max(1, now - (t.startedAt ?? now)) }
-                : t
-            );
-            const chain = p.chain.map((c) =>
-              c.kind === "tool" && c.tool.durationMs === undefined
-                ? { ...c, tool: { ...c.tool, durationMs: Math.max(1, now - (c.tool.startedAt ?? now)) } }
-                : c
-            );
-            const next = { ...p, tools, chain, phase: p.phase === "streaming" ? p.phase : ("done" as const) };
-            m.live = next;
-            return next;
-          });
+          // A dropped tail is not itself completion evidence. Reconcile history;
+          // only settle if the current turn has a persisted final assistant
+          // answer (or assistant.completed was already observed). Otherwise
+          // preserve busy/phase and let the session poll reattach again.
+          const reconciled = await loadMessages(sessionId, false);
+          const lastPersisted = reconciled[reconciled.length - 1];
+          const finishedEvidence =
+            moduleFinalAppended[sessionId] === true ||
+            (lastPersisted?.role === "assistant" && lastPersisted.content.trim().length > 0);
+          if (finishedEvidence) {
+            m.busy = false;
+            commitReattachLive((p) => settleLiveState(p));
+            if (activeIdRef.current === sessionId) setBusy(false);
+          } else {
+            m.busy = true;
+            if (activeIdRef.current === sessionId) setBusy(true);
+            dbg("reattach", "tail dropped without completion evidence — preserving live state", { sessionId });
+          }
         } else {
           // Run finished (or rotated) before we reattached — no live frames
           // came back. The module snapshot may still hold un-settled
           // (spinning) tools from the interrupted stream: settle them now so
           // returning NEVER shows "loading forever". Also clear any stale
           // busy flag and reconcile the final answer from the server.
-          setBusy(false);
+          if (activeIdRef.current === sessionId) setBusy(false);
           m.busy = false;
           // Remember this no-op so the 15s poll doesn't immediately re-fire
           // reattach for a run that already finished (hammer-loop fix).
           reattachNoopAt.current[sessionId] = Date.now();
           const now = Date.now();
-          setLive((p) => {
+          commitReattachLive((p) => {
             const stillPending = p.tools.some((t) => t.durationMs === undefined);
             if (!stillPending && p.phase === "done") return p;
             const tools = p.tools.map((t) => settleTool(t, now));
             const chain = p.chain.map((c) => settleToolInChain(c, now));
-            const next = { ...p, tools, chain, phase: "done" as const };
-            m.live = next;
-            liveBySessionRef.current[sessionId] = { live: next, streamedText: m.streamedText };
-            return next;
+            return { ...p, tools, chain, phase: "done" as const };
           });
           // Reconcile the messages from the server so any final answer that
           // landed while we were away shows up.
           await loadMessages(sessionId).catch(() => {});
         }
-        streamSessionRef.current = null;
-        m.streamSession = null;
+        if (!attachAbort.signal.aborted && streamSessionRef.current === sessionId) {
+          streamSessionRef.current = null;
+          m.streamSession = null;
+        }
       } catch {
         // Aborted (new send started) or transient — the 15s session poll
         // will re-trigger reattach if the run is still live.
         dbg("reattach", `events stream ABORTED/ERROR`, { sessionId });
-        setBusy(false);
-        streamSessionRef.current = null;
+        if (activeIdRef.current === sessionId && !attachAbort.signal.aborted) {
+          // A transport error is not evidence the laptop run ended. Preserve
+          // the restored busy/phase snapshot until polling reconnects.
+          setBusy(m.busy && m.live.phase !== "done" && m.live.phase !== "error");
+        }
+        if (!attachAbort.signal.aborted && streamSessionRef.current === sessionId) {
+          streamSessionRef.current = null;
+        }
       } finally {
+        if (reattachAbort.current === attachAbort) reattachAbort.current = null;
         inflight.delete(sessionId);
       }
     },
@@ -2024,7 +2249,7 @@ export default function ChatPage() {
       const sess = sessions.find((s) => s.id === activeId);
       const snap = moduleLive[activeId];
       const snapActive = snap && snap.live.phase !== "idle" && snap.live.phase !== "done";
-      if ((sess?.is_active || snapActive) && !busyRef.current) {
+      if ((sess?.is_active || snapActive) && streamSessionRef.current !== activeId) {
         void reattachRun(activeId);
       }
     }
@@ -2132,8 +2357,10 @@ export default function ChatPage() {
     // feel dead during work (the old `if (busy) return`).
     if (id === activeId) return;
     dbg("nav", `selectSession -> ${id} (was ${activeId})`, { busy: busyRef.current, streamSession: streamSessionRef.current });
-    // Preserve the unsent draft of the conversation we're leaving.
-    if (activeId) draftsRef.current[activeId] = input;
+    // Detach a tail reader for the conversation we're leaving. This never
+    // interrupts the server-side agent; it only prevents the old reader from
+    // mutating the newly selected conversation's UI.
+    reattachAbort.current?.abort();
     // Save the current session's live state so we can restore it when the
     // user comes back — an active stream keeps its place in the UI.
     if (activeId) {
@@ -2143,10 +2370,6 @@ export default function ChatPage() {
     setMessages([]);
     setStreamedText("");
     setLive(IDLE_LIVE);
-    // Entering a session is a new display generation — a stale
-    // moduleFinalAppended=true from a previous completed run on this session
-    // must not suppress the live bubble of a run we reattach to.
-    bumpRunGen(id);
     // Restore this session's live state if it has one (background stream).
     const saved = liveBySessionRef.current[id];
     if (saved) {
@@ -2167,7 +2390,11 @@ export default function ChatPage() {
     // On mobile the sidebar fills the whole view — close it after picking
     // so the conversation is visible. Desktop keeps it open.
     if (window.innerWidth < 768) setSidebarOpen(false);
-  }, [activeId, loadMessages, input, live, streamedText, sessions, reattachRun]);
+  }, [activeId, loadMessages, live, streamedText, sessions, reattachRun, setActiveId]);
+
+  const updateActiveDraft = useCallback((draft: string) => {
+    if (activeId) draftsRef.current[activeId] = draft;
+  }, [activeId]);
 
   const deleteSession = useCallback(async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -2699,23 +2926,14 @@ export default function ChatPage() {
               )}
             </div>
             <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
-              {messagesLoading ? (
-                <MessageSkeleton />
-              ) : messages.length === 0 && !busy ? (
-                <div className="flex h-full flex-col items-center justify-center gap-2 text-sm" style={{ color: "var(--text-faint)" }}>
-                  <MessageSquare className="h-8 w-8 opacity-40" />
-                  <span>Ask me anything — type below or tap the mic to speak.</span>
-                  <span className="font-mono text-xs opacity-60">Tip: type <span style={{ color: "var(--accent)" }}>/</span> for commands</span>
-                </div>
-              ) : (
-                <>
-                  {messages.map((m, i) => (
-                    <MessageBubble key={`${m.role}-${i}`} msg={m} settings={settings} />
-                  ))}
-                  {busy && <PhaseBanner phase={live.phase} toolCount={live.toolCount} elapsedSec={elapsedSec} />}
-                  {busy && renderLiveContent()}
-                </>
-              )}
+              <MessageHistory
+                messages={messages}
+                messagesLoading={messagesLoading}
+                busy={busy}
+                settings={settings}
+              />
+              {busy && <PhaseBanner phase={live.phase} toolCount={live.toolCount} elapsedSec={elapsedSec} />}
+              {busy && renderLiveContent()}
               <div ref={bottomRef} />
             </div>
 
@@ -2740,11 +2958,12 @@ export default function ChatPage() {
                 whole page (sidebar + messages). Fixes textbox lag. */}
             <Composer
               input={input}
+              draftKey={activeId ?? "new"}
               setInput={setInput}
+              onDraftChange={updateActiveDraft}
               send={send}
               busy={busy}
               stopRun={stopRun}
-              activeId={activeId}
               listening={listening}
               toggleMic={toggleMic}
               composerExpanded={composerExpanded}
