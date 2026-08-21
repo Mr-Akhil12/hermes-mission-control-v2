@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import type { ChatMsg, ChatSettings, StreamEvent, ToolEvent, ChainSegment, RunStats, ToolCallInfo, ChatSegment } from "@/lib/chat-types";
 import { useSessions } from "@/lib/use-sessions";
-import { PROFILES, profileLabel } from "@/lib/profiles";
+import { PROFILES, profileLabel, type ChatProfile } from "@/lib/profiles";
 import { MessageBubble, MarkdownLite } from "@/components/chat/MessageBubble";
 import { ChatSettingsButton, DEFAULT_SETTINGS, loadSettings } from "@/components/chat/ChatSettings";
 import { Composer, type PendingAttachment } from "@/components/chat/Composer";
@@ -212,10 +212,45 @@ export default function ChatPage() {
   const draftsRef = useRef<Record<string, string>>({});
   const [composerExpanded, setComposerExpanded] = useState(false);
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  // Live multiplex profiles from the state server (auto-shows any profile
+  // created via `hermes profile create` — e.g. ox-alpha). Merged with the
+  // static fallback list; deduped by id, live list wins.
+  const [extraProfiles, setExtraProfiles] = useState<ChatProfile[]>([]);
 
   // Load display settings once.
   useEffect(() => {
     setSettings(loadSettings());
+  }, []);
+
+  // Fetch the live profile list once on mount. If the state server is
+  // reachable it returns every profile dir under ~/.hermes/profiles/ so the
+  // dropdown never goes stale when a new profile is created.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/chat/profiles", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => {
+        if (cancelled) return;
+        const live = (d?.profiles ?? []) as { name: string; description?: string; model?: string }[];
+        const known = new Set(PROFILES.map((p) => p.id));
+        const extras = live
+          .filter((p) => p.name && !known.has(p.name))
+          .map((p) => ({
+            id: p.name,
+            label: p.name
+              .split(/[-_]/)
+              .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+              .join(" "),
+            role: p.description || (p.model ? `Model: ${p.model}` : "Custom profile"),
+          }));
+        if (!cancelled) setExtraProfiles(extras);
+      })
+      .catch(() => {
+        /* state server unreachable — keep the static list */
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Restore the unsent draft for the newly active conversation.
@@ -2651,7 +2686,7 @@ export default function ChatPage() {
                 style={{ borderColor: "var(--card-border)", color: "var(--accent-2)" }}
                 aria-label="Switch profile"
               >
-                {PROFILES.map((p) => (
+                {[...extraProfiles, ...PROFILES].map((p) => (
                   <option key={p.id || "default"} value={p.id}>
                     {p.label} — {p.role}
                   </option>
@@ -2659,7 +2694,7 @@ export default function ChatPage() {
               </select>
               {profile !== "" && (
                 <span className="text-[10px]" style={{ color: "var(--text-faint)" }}>
-                  {profileLabel(profile)} profile — separate conversations, separate memory
+                  {profileLabel(profile, extraProfiles)} profile — separate conversations, separate memory
                 </span>
               )}
             </div>
@@ -2752,7 +2787,7 @@ export default function ChatPage() {
                       send(input);
                     }
                   }}
-                  placeholder={activeId ? "Message Hermes…  (type / for commands)" : "Type your first message to start…"}
+                  placeholder=""
                   disabled={false}
                   className="min-h-0 flex-1 resize-none bg-transparent px-4 py-3 text-sm leading-relaxed outline-none disabled:opacity-50"
                   style={{ color: "var(--text)" }}

@@ -105,6 +105,122 @@ def load_runs() -> list[dict]:
     ]
 
 
+def load_profiles() -> list[dict]:
+    """List multiplex profiles (dirs under ~/.hermes/profiles/) with their
+    metadata — model, description, whether they're in the gateway allowlist.
+    This powers the chat profile dropdown AND the Agents screen: any profile
+    created via `hermes profile create` shows up automatically."""
+    profiles_dir = HERMES / "profiles"
+    if not profiles_dir.is_dir():
+        return []
+    # Gateway allowlist (if set) tells us which profiles are actually served
+    # by the multiplexer /p/<profile>/ mirrors.
+    allowlist = set()
+    try:
+        import yaml  # noqa: F401 — only used here; venv has it
+        import re
+        cfg_text = (HERMES / "config.yaml").read_text()
+        # Lightweight parse: gateway.multiplex_profile_allowlist or top-level
+        allow = re.search(r"multiplex_profile_allowlist:\s*(.*?)(?:\n\s*\w|\n\s*#|\Z)", cfg_text, re.S)
+        if allow:
+            import ast
+            # YAML list "  - breaker" — gather entries
+            entries = re.findall(r"^\s*-\s*([\w-]+)", allow.group(1), re.M)
+            allowlist = {e for e in entries if e and e != "default"}
+    except Exception:
+        allowlist = set()
+
+    profiles = []
+    for entry in sorted(profiles_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        name = entry.name
+        model = ""
+        provider = ""
+        # model + provider from config.yaml
+        try:
+            cfg = json.loads("{}")
+            import re as _re
+            text = (entry / "config.yaml").read_text() if (entry / "config.yaml").exists() else ""
+            m = _re.search(r"^\s*model:\s*\n\s*default:\s*(\S+)", text, _re.M)
+            if m:
+                model = m.group(1)
+            m = _re.search(r"^\s*provider:\s*(\S+)", text, _re.M)
+            if m:
+                provider = m.group(1)
+        except Exception:
+            pass
+        # profile.yaml metadata
+        desc = ""
+        try:
+            meta = json.loads((entry / "profile.yaml").read_text()) if (entry / "profile.yaml").exists() else {}
+            desc = str(meta.get("description") or "").strip()
+        except Exception:
+            desc = ""
+        profiles.append(
+            {
+                "name": name,
+                "model": model,
+                "provider": provider,
+                "description": desc,
+                "served": name in allowlist,
+                "path": str(entry),
+            }
+        )
+    return profiles
+
+
+def load_delegations(limit: int = 50) -> list[dict]:
+    """Recent subagent delegations from async_delegations — the live log of
+    what subagents were spawned to do, who they report to, and their outcome.
+    Used by the Agents screen to show real subagent activity."""
+    if not STATE.exists():
+        return []
+    con = sqlite3.connect(STATE)
+    try:
+        rows = con.execute(
+            "SELECT delegation_id, state, dispatched_at, completed_at, parent_session_id, task_json, result_json "
+            "FROM async_delegations ORDER BY dispatched_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    except Exception:
+        return []
+    out = []
+    for r in rows:
+        tid, state, disp, done, parent, task, result = r
+        goal = ""
+        model = ""
+        role = ""
+        toolsets = None
+        try:
+            tj = json.loads(task) if task else {}
+            if isinstance(tj, dict):
+                g = tj.get("goal") or tj.get("goals") or ""
+                if isinstance(g, list):
+                    g = "; ".join(str(x) for x in g)
+                goal = str(g)[:300]
+                model = str(tj.get("model") or "")
+                role = str(tj.get("role") or "")
+                toolsets = tj.get("toolsets")
+        except Exception:
+            pass
+        out.append(
+            {
+                "id": tid,
+                "state": state,
+                "role": role or None,
+                "model": model or None,
+                "parent_session": parent or None,
+                "goal": goal,
+                "dispatched_at": disp,
+                "completed_at": done,
+                "toolsets": toolsets,
+            }
+        )
+    con.close()
+    return out
+
+
 def load_sessions(limit: int = 25, source: str | None = None) -> list[dict]:
     if not STATE.exists():
         return []
@@ -115,7 +231,8 @@ def load_sessions(limit: int = 25, source: str | None = None) -> list[dict]:
         # by cron runs and real chats vanish from the list.
         rows = con.execute(
             "SELECT id, source, title, started_at, ended_at, end_reason, message_count, tool_call_count, "
-            "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, api_call_count "
+            "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, api_call_count, "
+            "last_activity_at, last_activity_description "
             "FROM sessions WHERE source = 'dashboard' OR source = '' OR source IS NULL "
             "ORDER BY started_at DESC LIMIT ?",
             (limit,),
@@ -128,7 +245,8 @@ def load_sessions(limit: int = 25, source: str | None = None) -> list[dict]:
         # vanish from the ALL tab because 19,408 cron rows sit ahead of them.
         rows = con.execute(
             "SELECT id, source, title, started_at, ended_at, end_reason, message_count, tool_call_count, "
-            "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, api_call_count "
+            "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, api_call_count, "
+            "last_activity_at, last_activity_description "
             "FROM sessions WHERE source != 'cron' "
             "ORDER BY started_at DESC LIMIT ?",
             (limit,),
@@ -136,7 +254,8 @@ def load_sessions(limit: int = 25, source: str | None = None) -> list[dict]:
     else:
         rows = con.execute(
             "SELECT id, source, title, started_at, ended_at, end_reason, message_count, tool_call_count, "
-            "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, api_call_count "
+            "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, api_call_count, "
+            "last_activity_at, last_activity_description "
             "FROM sessions ORDER BY started_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
@@ -187,6 +306,8 @@ def load_sessions(limit: int = 25, source: str | None = None) -> list[dict]:
                 "reasoning_tokens": r[12] or 0,
                 "api_call_count": r[13] or 0,
                 "last_message": last,
+                "last_activity_at": r[14],
+                "last_activity_description": r[15] or "",
                 "is_active": is_active,
             }
         )
@@ -581,6 +702,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"jobs": load_crons(), "source": "local"})
             elif path == "/api/runs":
                 self._json({"runs": load_runs(), "source": "local"})
+            elif path == "/api/profiles":
+                self._json({"profiles": load_profiles(), "source": "local"})
+            elif path == "/api/delegations":
+                self._json({"delegations": load_delegations(), "source": "local"})
             elif path == "/api/sessions":
                 if profile_prefix:
                     # Profile-multiplexed session list — each profile has its

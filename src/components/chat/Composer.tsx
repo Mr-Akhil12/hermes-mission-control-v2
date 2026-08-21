@@ -4,7 +4,7 @@
 // component instead of the whole page (sidebar + stats + messages). This is
 // the fix for the laggy textbox: keystrokes no longer re-render everything.
 
-import { memo, useEffect, useRef } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { Mic, MicOff, Send, Square, Maximize2, Minimize2, Volume2, Paperclip, X } from "lucide-react";
 import { SlashAutocomplete } from "./SlashAutocomplete";
 
@@ -49,6 +49,8 @@ export const Composer = memo(function Composer({
 }) {
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const dropCount = useRef(0);
 
   // Auto-resize the composer textarea to fit its content (wraps after one
   // line, grows up to a cap). Collapses back to a single line when cleared.
@@ -59,12 +61,12 @@ export const Composer = memo(function Composer({
     el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
   }, [input]);
 
-  const pickFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files ?? []);
-    e.target.value = "";
-    if (files.length === 0) return;
-    const allowed = files.filter((f) => f.size <= 20 * 1024 * 1024);
-    const oversized = files.length - allowed.length;
+  // Shared file→attachment pipeline (click picker + drag-drop).
+  const addFiles = (files: FileList | File[]) => {
+    const list = Array.from(files ?? []);
+    if (list.length === 0) return;
+    const allowed = list.filter((f) => f.size <= 20 * 1024 * 1024);
+    const oversized = list.length - allowed.length;
     Promise.all(
       allowed.map(
         (f) =>
@@ -88,8 +90,40 @@ export const Composer = memo(function Composer({
       .catch(() => {});
   };
 
+  const pickFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files ?? [];
+    e.target.value = "";
+    addFiles(files);
+  };
+
+  // Drag-and-drop onto the composer: files land as attachments, exactly like
+  // tapping the paperclip. The drop zone is the whole composer row.
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    dropCount.current += 1;
+    setDragOver(false);
+    addFiles(e.dataTransfer.files);
+  };
+
   return (
-    <div className="relative flex items-end gap-2 border-t p-3" style={{ borderColor: "var(--card-border)" }}>
+    <div
+      className="relative flex items-end gap-2 border-t p-3"
+      style={{
+        borderColor: "var(--card-border)",
+        ...(dragOver
+          ? { boxShadow: "inset 0 0 0 2px var(--accent)", background: "rgba(124,108,255,0.08)" }
+          : {}),
+      }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        if (!dragOver) setDragOver(true);
+      }}
+      onDragLeave={(e) => {
+        // Only clear when the drag truly leaves the composer (not children).
+        if (e.currentTarget === e.target) setDragOver(false);
+      }}
+      onDrop={onDrop}
+    >
       <SlashAutocomplete input={input} onApply={setInput} />
       <input
         ref={fileRef}
@@ -114,7 +148,7 @@ export const Composer = memo(function Composer({
             <span
               key={`${a.name}-${i}`}
               className="flex max-w-[240px] items-center gap-1.5 rounded-lg border px-2 py-1 text-[10px]"
-              style={{ borderColor: "var(--card-border)", background: "rgba(124,108,255,0.08)", color: "var(--text-dim)" }}
+              style={{ borderColor: "var(--card-border)", background: "var(--bg-2)", color: "var(--text-dim)" }}
             >
               <span className="truncate">{a.name}</span>
               <span className="shrink-0 opacity-60">{(a.size / 1024).toFixed(0)}KB</span>
@@ -155,7 +189,7 @@ export const Composer = memo(function Composer({
           }
         }}
         rows={1}
-        placeholder={activeId ? "Message Hermes…" : "Type your first message…"}
+        placeholder=""
         disabled={false}
         className="min-w-0 flex-1 resize-none overflow-y-auto rounded-lg border bg-transparent px-3 py-2 text-sm leading-relaxed outline-none disabled:opacity-50"
         style={{ borderColor: "var(--card-border)", color: "var(--text)", maxHeight: 120 }}

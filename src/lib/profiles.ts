@@ -8,6 +8,9 @@ export type ChatProfile = {
   role: string;
 };
 
+// Static fallback list — used until the live /api/chat/profiles fetch
+// resolves, and merged with any profiles found on the machine so a profile
+// created via `hermes profile create` appears automatically.
 export const PROFILES: ChatProfile[] = [
   { id: "", label: "Hermes", role: "Default — orchestration, general work" },
   { id: "coder", label: "Coder", role: "Code, bugs, features" },
@@ -19,12 +22,12 @@ export const PROFILES: ChatProfile[] = [
   { id: "ops", label: "Ops", role: "Cron, deployments, infrastructure" },
 ];
 
-export function profileById(id: string): ChatProfile {
-  return PROFILES.find((p) => p.id === id) ?? PROFILES[0];
+export function profileById(id: string, extra: ChatProfile[] = []): ChatProfile {
+  return [...extra, ...PROFILES].find((p) => p.id === id) ?? PROFILES[0];
 }
 
-export function profileLabel(id: string): string {
-  return profileById(id).label;
+export function profileLabel(id: string, extra: ChatProfile[] = []): string {
+  return profileById(id, extra).label;
 }
 
 /** Prepend the /p/<profile>/ prefix for upstream Hermes API calls. */
