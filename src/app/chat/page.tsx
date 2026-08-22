@@ -2,7 +2,7 @@
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
-  Send, Mic, MicOff, Volume2, MessageSquare, Plus, ChevronLeft, ChevronRight,
+  Send, Mic, MicOff, MessageSquare, Plus, ChevronLeft, ChevronRight,
   Loader2, Trash2, Pencil, Square, CheckSquare, X, Maximize2, Minimize2, Bot,
 } from "lucide-react";
 import type { ChatMsg, ChatSettings, StreamEvent, ToolEvent, ChainSegment, RunStats, ToolCallInfo, ChatSegment } from "@/lib/chat-types";
@@ -11,7 +11,6 @@ import { PROFILES, profileLabel, type ChatProfile } from "@/lib/profiles";
 import { MessageBubble, MarkdownLite } from "@/components/chat/MessageBubble";
 import { ChatSettingsButton, DEFAULT_SETTINGS, loadSettings } from "@/components/chat/ChatSettings";
 import { Composer, type PendingAttachment } from "@/components/chat/Composer";
-import { SlashAutocomplete } from "@/components/chat/SlashAutocomplete";
 import { PhaseBanner, type RunPhase } from "@/components/chat/RunStatus";
 import { MessageSkeleton, SessionListSkeleton } from "@/components/chat/Skeleton";
 import { BrowserView } from "@/components/chat/BrowserView";
@@ -94,18 +93,74 @@ type PersistedChatResume = {
 function readPersistedChatResume(): PersistedChatResume | null {
   if (typeof window === "undefined") return null;
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(CHAT_RESUME_KEY) ?? "null") as PersistedChatResume | null;
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(CHAT_RESUME_KEY) ?? "null");
+    const candidate = parsed as Partial<PersistedChatResume> | null;
+    const savedAt = candidate?.savedAt;
+    const age = typeof savedAt === "number" ? Date.now() - savedAt : Number.POSITIVE_INFINITY;
+    const snapshot = candidate?.snapshot as Partial<ModuleLiveState> | undefined;
+    const persistedLive = snapshot?.live as Partial<LiveState> | undefined;
+    const validMessages =
+      Array.isArray(candidate?.messages) &&
+      candidate.messages.every(
+        (message) =>
+          !!message &&
+          typeof message === "object" &&
+          (message.role === "user" || message.role === "assistant" || message.role === "system") &&
+          typeof message.content === "string"
+      );
+    const validTools =
+      Array.isArray(persistedLive?.tools) &&
+      persistedLive.tools.every(
+        (tool) =>
+          !!tool &&
+          typeof tool === "object" &&
+          typeof tool.name === "string" &&
+          typeof tool.startedAt === "number" &&
+          Number.isFinite(tool.startedAt)
+      );
+    const validChain =
+      Array.isArray(persistedLive?.chain) &&
+      persistedLive.chain.every(
+        (segment) =>
+          !!segment &&
+          typeof segment === "object" &&
+          (segment.kind === "reasoning"
+            ? typeof segment.text === "string"
+            : segment.kind === "tool" && !!segment.tool && typeof segment.tool.name === "string")
+      );
+    const validPhase =
+      typeof persistedLive?.phase === "string" &&
+      ["idle", "initializing", "thinking", "tools", "streaming", "done", "error"].includes(persistedLive.phase);
     if (
-      !parsed ||
-      parsed.version !== 2 ||
-      !parsed.sessionId ||
-      Date.now() - parsed.savedAt > CHAT_RESUME_TTL_MS
+      !candidate ||
+      candidate.version !== 2 ||
+      typeof candidate.sessionId !== "string" ||
+      !candidate.sessionId ||
+      typeof candidate.profile !== "string" ||
+      !validMessages ||
+      !snapshot ||
+      !persistedLive ||
+      !validTools ||
+      !validChain ||
+      !validPhase ||
+      typeof persistedLive.reasoning !== "string" ||
+      typeof persistedLive.toolCount !== "number" ||
+      typeof persistedLive.failedCount !== "number" ||
+      typeof snapshot.streamedText !== "string" ||
+      typeof snapshot.busy !== "boolean" ||
+      typeof snapshot.lastSeq !== "number" ||
+      !Number.isFinite(snapshot.lastSeq) ||
+      snapshot.lastSeq < 0 ||
+      !Number.isFinite(age) ||
+      age < -60_000 ||
+      age > CHAT_RESUME_TTL_MS
     ) {
       window.localStorage.removeItem(CHAT_RESUME_KEY);
       return null;
     }
-    return parsed;
+    return candidate as PersistedChatResume;
   } catch {
+    window.localStorage.removeItem(CHAT_RESUME_KEY);
     return null;
   }
 }
@@ -113,21 +168,31 @@ function readPersistedChatResume(): PersistedChatResume | null {
 function persistChatResume(
   sessionId: string,
   profile: string,
-  messages: ChatMsg[],
-  live: LiveState,
-  streamedText: string,
-  busy: boolean
+  messages: ChatMsg[]
 ): void {
   if (typeof window === "undefined") return;
   const current = getModuleLive(sessionId);
+  const lastSeq = Math.max(lastSeqState[sessionId] ?? 0, current.lastSeq ?? 0);
+  // The module mirror is advanced synchronously with each parsed SSE frame.
+  // React may not have committed that frame when pagehide fires, so persisting
+  // render-captured props here would pair a NEW seq with OLD text/chain and
+  // permanently skip the missing frame after reload.
   const snapshot: ModuleLiveState = {
-    live,
-    streamedText,
-    busy,
-    streamSession: busy ? sessionId : null,
-    lastSeq: lastSeqState[sessionId] ?? current.lastSeq ?? 0,
+    live: current.live,
+    streamedText: current.streamedText,
+    busy: current.busy,
+    streamSession: current.busy ? sessionId : null,
+    lastSeq,
   };
   moduleLive[sessionId] = snapshot;
+  const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
+  // Never persist the suppression bit ahead of the actual final bubble. If
+  // pagehide lands between assistant.completed and React's message commit,
+  // the restored live bubble remains visible instead of hiding the answer.
+  const finalAppended =
+    moduleFinalAppended[sessionId] === true &&
+    !!lastAssistant &&
+    lastAssistant.content === snapshot.streamedText;
   try {
     window.localStorage.setItem(
       CHAT_RESUME_KEY,
@@ -138,7 +203,7 @@ function persistChatResume(
         profile,
         messages,
         snapshot,
-        finalAppended: moduleFinalAppended[sessionId] === true,
+        finalAppended,
         runGen: moduleRunGen[sessionId] ?? 0,
       } satisfies PersistedChatResume)
     );
@@ -177,9 +242,6 @@ function getModuleLive(sessionId: string): ModuleLiveState {
   return moduleLive[sessionId];
 }
 
-function toolEventToRunTool(t: ToolEvent) {
-  return t;
-}
 
 // Append a reasoning delta to the ordered chain: extend the LAST reasoning
 // segment if the most recent segment is reasoning; otherwise start a new
@@ -216,6 +278,37 @@ function settleToolInChain(c: ChainSegment, now: number): ChainSegment {
   return { ...c, tool: settleTool(c.tool, now) };
 }
 
+function completeFirstMatchingTool(
+  tools: ToolEvent[],
+  name: string,
+  update: (tool: ToolEvent) => ToolEvent
+): ToolEvent[] {
+  const index = tools.findIndex(
+    (tool) => tool.name === name && (tool.durationMs === undefined || tool.interrupted)
+  );
+  if (index < 0) return tools;
+  return tools.map((tool, toolIndex) => (toolIndex === index ? update(tool) : tool));
+}
+
+function completeFirstMatchingToolInChain(
+  chain: ChainSegment[],
+  name: string,
+  update: (tool: ToolEvent) => ToolEvent
+): ChainSegment[] {
+  const index = chain.findIndex(
+    (segment) =>
+      segment.kind === "tool" &&
+      segment.tool.name === name &&
+      (segment.tool.durationMs === undefined || segment.tool.interrupted)
+  );
+  if (index < 0) return chain;
+  return chain.map((segment, segmentIndex) =>
+    segmentIndex === index && segment.kind === "tool"
+      ? { ...segment, tool: update(segment.tool) }
+      : segment
+  );
+}
+
 // Settle a live snapshot once a run is confirmed finished: every tool with
 // no duration (still showing the spinner) gets a completion time, and the
 // phase flips to "done" so returning to the chat NEVER shows infinite
@@ -232,17 +325,19 @@ function settleLiveState(live: LiveState, now = Date.now()): LiveState {
 // The persisted transcript is the heaviest subtree on this page. It changes
 // only when a message is added/reconciled or display settings change — never
 // for keystrokes, elapsed ticks, reasoning deltas, or streamed answer deltas.
+type MessageHistoryProps = {
+  messages: ChatMsg[];
+  messagesLoading: boolean;
+  busy: boolean;
+  settings: ChatSettings;
+};
+
 const MessageHistory = memo(function MessageHistory({
   messages,
   messagesLoading,
   busy,
   settings,
-}: {
-  messages: ChatMsg[];
-  messagesLoading: boolean;
-  busy: boolean;
-  settings: ChatSettings;
-}) {
+}: MessageHistoryProps) {
   useEffect(() => {
     dbg("render", `MessageHistory commit messages=${messages.length} loading=${messagesLoading} busy=${busy}`);
   });
@@ -264,7 +359,15 @@ const MessageHistory = memo(function MessageHistory({
       ))}
     </>
   );
-});
+}, (previous, next) =>
+  previous.messages === next.messages &&
+  previous.messagesLoading === next.messagesLoading &&
+  previous.settings === next.settings &&
+  // `busy` only changes this subtree's output for the empty-state prompt.
+  // With a transcript present, reattach/settle busy flips must not revisit
+  // every persisted bubble.
+  (previous.messages.length > 0 || previous.busy === next.busy)
+);
 
 export default function ChatPage() {
   const [error, setError] = useState<string | null>(null);
@@ -287,6 +390,7 @@ export default function ChatPage() {
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = activeId;
   const [messages, setMessages] = useState<ChatMsg[]>([]);
+  const messagesRef = useRef<ChatMsg[]>(messages);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [listening, setListening] = useState(false);
@@ -297,7 +401,6 @@ export default function ChatPage() {
   const [deleting, setDeleting] = useState(false);
   const [chainOpen, setChainOpen] = useState(false);
   const [live, setLive] = useState<LiveState>(IDLE_LIVE);
-  const [lastStats, setLastStats] = useState<RunStats | null>(null);
   const [settings, setSettings] = useState<ChatSettings>(DEFAULT_SETTINGS);
   const [streamedText, setStreamedText] = useState("");
   const [elapsedSec, setElapsedSec] = useState(0);
@@ -308,6 +411,10 @@ export default function ChatPage() {
   const reasoningRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
   const streamAbort = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  const primaryStreamSessionRef = useRef<string | null>(null);
+  const reattachAbort = useRef<AbortController | null>(null);
+
   // Which session the current SSE stream belongs to — so switching away
   // doesn't kill a background run, and switching back can restore its state.
   const streamSessionRef = useRef<string | null>(null);
@@ -330,6 +437,11 @@ export default function ChatPage() {
   const [extraProfiles, setExtraProfiles] = useState<ChatProfile[]>([]);
   const [restoreReady, setRestoreReady] = useState(false);
   const restoredSessionIdRef = useRef<string | null>(null);
+  const initialReconcileStartedRef = useRef(false);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   useEffect(() => {
     dbg("render", `ChatPage commit active=${activeId ?? "new"} messages=${messages.length} busy=${busy} phase=${live.phase}`);
@@ -339,8 +451,11 @@ export default function ChatPage() {
   // live chain, text, phase, and seq cursor before any network reconciliation;
   // the first painted client state is therefore the state the user left.
   useEffect(() => {
+    const requestedId = new URLSearchParams(window.location.search).get("resume");
     const resume = readPersistedChatResume();
-    if (resume) {
+    // An explicit /chat?resume=... navigation is authoritative. Never paint a
+    // different locally persisted conversation while that target loads.
+    if (resume && (!requestedId || requestedId === resume.sessionId)) {
       restoredSessionIdRef.current = resume.sessionId;
       moduleLive[resume.sessionId] = resume.snapshot;
       lastSeqState[resume.sessionId] = resume.snapshot.lastSeq;
@@ -351,12 +466,13 @@ export default function ChatPage() {
         streamedText: resume.snapshot.streamedText,
       };
       setProfile(resume.profile);
+      activeIdRef.current = resume.sessionId;
       setActiveId(resume.sessionId);
+      messagesRef.current = resume.messages;
       setMessages(resume.messages);
       setMessagesLoading(false);
       setLive(resume.snapshot.live);
       setStreamedText(resume.snapshot.streamedText);
-      setLastStats(resume.snapshot.live.stats);
       const resumableBusy =
         resume.snapshot.busy &&
         resume.snapshot.live.phase !== "idle" &&
@@ -425,7 +541,6 @@ export default function ChatPage() {
       if (saved.live.phase !== "idle") {
         setLive(saved.live);
         setStreamedText(saved.streamedText);
-        setLastStats(saved.live.stats);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -435,7 +550,7 @@ export default function ChatPage() {
   // visibility flush synchronously so the last delta/seq survives an app kill.
   useEffect(() => {
     if (!restoreReady || !activeId) return;
-    const flush = () => persistChatResume(activeId, profile, messages, live, streamedText, busy);
+    const flush = () => persistChatResume(activeId, profile, messages);
     const timer = window.setTimeout(flush, 80);
     const onPageHide = () => flush();
     const onVisibility = () => {
@@ -450,12 +565,17 @@ export default function ChatPage() {
     };
   }, [restoreReady, activeId, profile, messages, live, streamedText, busy]);
 
-  const loadMessages = useCallback(async (id: string, showLoading = true) => {
-    if (showLoading) setMessagesLoading(true);
+  const loadMessages = useCallback(async (id: string, showLoading = true, applyToView = true, profileOverride?: string) => {
+    const requestedRunGen = moduleRunGen[id] ?? 0;
+    if (showLoading && applyToView) setMessagesLoading(true);
     try {
-      const profileQs = profile ? `?profile=${encodeURIComponent(profile)}` : "";
+      const selectedProfile = profileOverride ?? profile;
+      const profileQs = selectedProfile ? `?profile=${encodeURIComponent(selectedProfile)}` : "";
       const res = await fetch(`/api/chat/sessions/${id}/messages${profileQs}`, { cache: "no-store" });
       const data = await res.json();
+      if (!res.ok || data?.error) {
+        throw new Error(data?.error?.message ?? data?.error ?? `messages failed (${res.status})`);
+      }
       const list = data?.data ?? [];
       dbg("loadMessages", `GET /messages rows=${list.length} http=${res.status} profile=${profile ?? "default"}`, { sessionId: id });
       const modelName = MODEL;
@@ -639,7 +759,29 @@ export default function ChatPage() {
         }
         msgs.push(pending);
       }
-      setMessages(msgs);
+      if (
+        applyToView &&
+        activeIdRef.current === id &&
+        (moduleRunGen[id] ?? 0) === requestedRunGen
+      ) {
+        const currentMessages = messagesRef.current;
+        const snapshot = moduleLive[id];
+        const localFinal = [...currentMessages].reverse().find((message) => message.role === "assistant")?.content;
+        const serverFinal = [...msgs].reverse().find((message) => message.role === "assistant")?.content;
+        const preserveRestoredFinal =
+          !showLoading &&
+          !!snapshot?.busy &&
+          currentMessages.length >= msgs.length &&
+          !!localFinal &&
+          localFinal === snapshot.streamedText &&
+          localFinal !== serverFinal;
+        if (!preserveRestoredFinal) {
+          messagesRef.current = msgs;
+          setMessages(msgs);
+        } else {
+          dbg("loadMessages", "kept newer restored final while persistence catches up", { sessionId: id });
+        }
+      }
       dbg("loadMessages", `merged rows=${list.length} -> msgs=${msgs.length} toolResults=${toolResults.size}`, {
         sessionId: id,
         assistantMsgs: msgs.filter((m) => m.role === "assistant").length,
@@ -648,15 +790,18 @@ export default function ChatPage() {
       return msgs;
     } catch (e) {
       dbg("loadMessages", `FAILED ${e instanceof Error ? e.message : e}`, { sessionId: id });
-      setError(`Failed to load messages: ${e instanceof Error ? e.message : e}`);
+      if (applyToView && activeIdRef.current === id && (moduleRunGen[id] ?? 0) === requestedRunGen) {
+        setError(`Failed to load messages: ${e instanceof Error ? e.message : e}`);
+      }
       return [] as ChatMsg[];
     } finally {
-      if (showLoading) setMessagesLoading(false);
+      if (showLoading && applyToView && activeIdRef.current === id) setMessagesLoading(false);
     }
   }, [profile]);
 
   useEffect(() => {
-    if (!restoreReady) return;
+    if (!restoreReady || initialReconcileStartedRef.current) return;
+    initialReconcileStartedRef.current = true;
     const resumeId = new URLSearchParams(window.location.search).get("resume");
     const persistedId = restoredSessionIdRef.current;
     const requestedId = resumeId ?? persistedId;
@@ -666,11 +811,13 @@ export default function ChatPage() {
       // so cron/subagent sessions (not in the dashboard filter) resolve too.
       const target = requestedId ? list.find((s) => s.id === requestedId) : undefined;
       if (target) {
+        activeIdRef.current = target.id;
         setActiveId(target.id);
         // The persisted transcript is already visible. Reconcile silently so
         // returning never flashes a skeleton over an intact conversation.
         loadMessages(target.id, target.id !== persistedId);
       } else if (list.length > 0) {
+        activeIdRef.current = list[0].id;
         setActiveId(list[0].id);
         loadMessages(list[0].id);
       } else {
@@ -725,6 +872,7 @@ export default function ChatPage() {
     // first send() instead. Just clear the UI and arm the composer.
     setError(null);
     setLive(IDLE_LIVE);
+    activeIdRef.current = null;
     setActiveId(null);
     setMessages([]);
     setStreamedText("");
@@ -737,14 +885,35 @@ export default function ChatPage() {
   const sendRef = useRef<((text: string) => Promise<void>) | null>(null);
 
   const stopRun = useCallback(() => {
-    streamAbort.current?.abort();
+    const sessionId = activeIdRef.current;
+    if (primaryStreamSessionRef.current === sessionId) {
+      streamAbort.current?.abort("user-stop");
+    }
+    reattachAbort.current?.abort("user-stop");
+    const now = Date.now();
+    if (sessionId) {
+      const snapshot = getModuleLive(sessionId);
+      snapshot.live = settleLiveState(snapshot.live, now);
+      snapshot.busy = false;
+      snapshot.streamSession = null;
+      liveBySessionRef.current[sessionId] = {
+        live: snapshot.live,
+        streamedText: snapshot.streamedText,
+      };
+      if (streamSessionRef.current === sessionId) streamSessionRef.current = null;
+      // The browser is only a view; explicitly interrupt the real laptop run.
+      void fetch("/api/chat/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: "/stop", session_id: sessionId }),
+      }).catch(() => {});
+    }
     setLive((prev) => ({
-      ...prev,
-      phase: "done",
+      ...settleLiveState(prev, now),
       stats: {
-        ...(prev.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }),
-        completedAt: Date.now(),
-        durationMs: Date.now() - (prev.stats?.startedAt ?? Date.now()),
+        ...(prev.stats ?? { toolCount: 0, failedTools: 0, startedAt: now }),
+        completedAt: now,
+        durationMs: now - (prev.stats?.startedAt ?? now),
       },
     }));
     setBusy(false);
@@ -819,6 +988,7 @@ export default function ChatPage() {
             if (!res.ok || !newId) {
               throw new Error(data?.error?.message ?? `fork failed (${res.status})`);
             }
+            activeIdRef.current = newId;
             setActiveId(newId);
             setMessages([]);
             setStreamedText("");
@@ -953,6 +1123,7 @@ export default function ChatPage() {
             setMessages((m) => [...m, { role: "system", content: `No session matching \`${arg}\`. Run \`/sessions\` to list.` }]);
             return true;
           }
+          activeIdRef.current = target.id;
           setActiveId(target.id);
           setMessages([]);
           setStreamedText("");
@@ -976,9 +1147,11 @@ export default function ChatPage() {
             const list = await loadSessions();
             if (target.id === activeId) {
               if (list.length > 0) {
+                activeIdRef.current = list[0].id;
                 setActiveId(list[0].id);
                 loadMessages(list[0].id);
               } else {
+                activeIdRef.current = null;
                 setActiveId(null);
                 setMessages([]);
               }
@@ -1151,6 +1324,7 @@ export default function ChatPage() {
           const id = data?.session?.id ?? data?.session_id ?? data?.data?.id;
           if (!id) throw new Error("No session id returned");
           sessionId = id;
+          activeIdRef.current = id;
           setActiveId(id);
           await loadSessions();
         } catch (e) {
@@ -1227,19 +1401,24 @@ export default function ChatPage() {
         const attachNote = attachPaths.map((p) => `[Attached file: ${p}]`).join("\n");
         trimmed = `${trimmed}\n\n${attachNote}`;
       }
-      setMessages((m) => [...m, { role: "user", content: trimmed }]);
-      setBusy(true);
-      setError(null);
-      bumpRunGen(sessionId);
-      setLive({
+      const startedAt = Date.now();
+      const initialLive: LiveState = {
         phase: "initializing",
         reasoning: "",
         tools: [],
         chain: [],
-        stats: { toolCount: 0, failedTools: 0, startedAt: Date.now(), usage: null, runtime: null },
+        stats: { toolCount: 0, failedTools: 0, startedAt, usage: null, runtime: null },
         toolCount: 0,
         failedCount: 0,
-      });
+      };
+      if (activeIdRef.current === sessionId) {
+        setMessages((current) => [...current, { role: "user", content: trimmed }]);
+        setBusy(true);
+        setLive(initialLive);
+        setStreamedText("");
+      }
+      setError(null);
+      bumpRunGen(sessionId);
       if (sessionId) {
         // The primary POST reader owns this session until its finally block.
         // Mark it explicitly so visibility/focus/session polling cannot open a
@@ -1249,12 +1428,14 @@ export default function ChatPage() {
         const m = getModuleLive(sessionId);
         m.busy = true;
         m.streamSession = sessionId;
-        m.live = { ...IDLE_LIVE, phase: "initializing", stats: m.live.stats };
+        m.live = initialLive;
+        m.streamedText = "";
+        liveBySessionRef.current[sessionId] = { live: initialLive, streamedText: "" };
       }
-      setStreamedText("");
 
       const abort = new AbortController();
       streamAbort.current = abort;
+      primaryStreamSessionRef.current = sessionId;
 
       let reasoning = "";
       let toolCount = 0;
@@ -1272,7 +1453,7 @@ export default function ChatPage() {
       let finalToolCalls: ToolCallInfo[] = [];
       let runUsage: RunStats["usage"] = null;
       let runRuntime: RunStats["runtime"] = null;
-      let startedAt = Date.now();
+      let currentLive = initialLive;
       // True when the authoritative run.completed event arrived. When it does,
       // the local message list + stats are already correct, so we can skip the
       // full server reload in finally (which replaces the whole array and
@@ -1289,23 +1470,28 @@ export default function ChatPage() {
       // as stalled so the finally can explain WHY it dropped the stream.
       let lastEventAt = Date.now();
       let stalled = false;
+      let sawRunEvent = false;
+      let terminalFailure = false;
+      let runFinished = false;
+      let readerLastSeq = sessionId ? lastSeqState[sessionId] ?? 0 : 0;
+      const baselineMessageCount = messagesRef.current.length;
+      const baselineLastAssistant = [...messagesRef.current]
+        .reverse()
+        .find((message) => message.role === "assistant")?.content;
 
       const bumpLive = (patch: Partial<LiveState>) => {
-        setLive((prev) => {
-          const next = { ...prev, ...patch };
-          // Keep the per-session snapshot fresh so switching back to this
-          // conversation restores the live stream where it left off.
-          if (sessionId) {
-            liveBySessionRef.current[sessionId] = { live: next, streamedText: full };
-            // Module-scope mirror: survives ChatPage unmount (tab switch),
-            // so returning to Chat restores the live run mid-flight.
-            const m = getModuleLive(sessionId);
-            m.live = next;
-            m.streamedText = full;
-            m.lastSeq = lastSeqState[sessionId] ?? m.lastSeq;
-          }
-          return next;
-        });
+        // SSE frames can arrive in one reader batch before React commits. Keep
+        // one synchronous accumulator and mirror it before scheduling paint;
+        // this also makes pagehide's seq/text/chain snapshot atomic.
+        currentLive = { ...currentLive, ...patch };
+        if (sessionId) {
+          liveBySessionRef.current[sessionId] = { live: currentLive, streamedText: full };
+          const m = getModuleLive(sessionId);
+          m.live = currentLive;
+          m.streamedText = full;
+          m.lastSeq = lastSeqState[sessionId] ?? m.lastSeq;
+        }
+        if (activeIdRef.current === sessionId) setLive(currentLive);
       };
 
       try {
@@ -1364,8 +1550,9 @@ export default function ChatPage() {
             // replays only what was missed — never the whole run from 0.
             const pseq = (payload as any).seq;
             if (typeof pseq === "number" && sessionId) {
-              lastSeqState[sessionId] = pseq;
-              getModuleLive(sessionId).lastSeq = pseq;
+              lastSeqState[sessionId] = Math.max(lastSeqState[sessionId] ?? 0, pseq);
+              readerLastSeq = Math.max(readerLastSeq, pseq);
+              getModuleLive(sessionId).lastSeq = lastSeqState[sessionId];
             }
             // The Hermes API puts the event type in the SSE `event:` line; the
             // data payload does NOT carry an `event` field. Normalize so the
@@ -1374,11 +1561,12 @@ export default function ChatPage() {
             if (!(payload as any).event) {
               payload = { ...(payload as any), event } as StreamEvent;
             }
+            sawRunEvent = true;
 
             switch (payload.event) {
               case "run.started": {
                 runRuntime = (payload as any).runtime ?? null;
-                bumpLive({ phase: "initializing", stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), runtime: runRuntime } });
+                bumpLive({ phase: "initializing", stats: { ...(currentLive.stats ?? { toolCount: 0, failedTools: 0, startedAt }), runtime: runRuntime } });
                 // brief "initializing" beat then move to thinking as events flow
                 dbg("sse", `run.started runtime=${runRuntime ?? "?"}`, { sessionId });
                 break;
@@ -1396,14 +1584,14 @@ export default function ChatPage() {
                   // Stream ONLY into the live bubble — do NOT append to the
                   // message list per-delta. Appending on every delta forces a
                   // full list re-render on mobile (shimmer/refresh feel).
-                  setStreamedText(full);
+                  if (activeIdRef.current === sessionId) setStreamedText(full);
                   if (sessionId) {
                     const snap = liveBySessionRef.current[sessionId];
                     if (snap) liveBySessionRef.current[sessionId] = { ...snap, streamedText: full };
                     // Module mirror — survives unmount (tab switch).
                     getModuleLive(sessionId).streamedText = full;
                   }
-                  if (liveRef.current.phase !== "tools") bumpLive({ phase: "streaming" });
+                  if (currentLive.phase !== "tools") bumpLive({ phase: "streaming" });
                   // Live token estimate so the footer's output-token count
                   // ticks up in real time instead of only appearing at the
                   // end. ~4 chars/token is a rough heuristic; the exact
@@ -1411,13 +1599,13 @@ export default function ChatPage() {
                   const estOut = Math.max(1, Math.round(full.length / 4));
                   bumpLive({
                     stats: {
-                      ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }),
+                      ...(currentLive.stats ?? { toolCount: 0, failedTools: 0, startedAt }),
                       toolCount,
                       failedTools: failedCount,
                       usage: {
-                        ...(liveRef.current.stats?.usage ?? {}),
+                        ...(currentLive.stats?.usage ?? {}),
                         output_tokens: estOut,
-                        total_tokens: (liveRef.current.stats?.usage?.input_tokens ?? 0) + estOut,
+                        total_tokens: (currentLive.stats?.usage?.input_tokens ?? 0) + estOut,
                       },
                     },
                   });
@@ -1428,7 +1616,7 @@ export default function ChatPage() {
                 const tname = (payload as any).tool_name ?? "_thinking";
                 const delta = (payload as any).delta ?? "";
                 const isBeat = !!(payload as any).beat;
-                dbg("sse", `tool.progress name=${tname} beat=${isBeat} delta=${delta.length}`, { sessionId, phase: liveRef.current.phase });
+                dbg("sse", `tool.progress name=${tname} beat=${isBeat} delta=${delta.length}`, { sessionId, phase: currentLive.phase });
                 if (tname === "_thinking") {
                   if (delta) {
                     reasoning += delta;
@@ -1436,7 +1624,7 @@ export default function ChatPage() {
                     bumpLive({
                       reasoning,
                       chain,
-                      phase: liveRef.current.phase === "initializing" ? "thinking" : liveRef.current.phase,
+                      phase: currentLive.phase === "initializing" ? "thinking" : currentLive.phase,
                     });
                   }
                 } else {
@@ -1449,15 +1637,15 @@ export default function ChatPage() {
                     const beatPreview = (payload as any).preview;
                     if (beatPreview && exists.preview !== beatPreview) {
                       dbg("beat", `refresh preview '${tname}': "${(exists.preview ?? "").slice(0, 60)}" -> "${beatPreview.slice(0, 60)}"`, { sessionId, elapsed: Math.round((Date.now() - exists.startedAt) / 1000) });
-                      toolEvents = toolEvents.map((t) => (t === exists ? { ...t, preview: beatPreview } : t));
-                      // Match by NAME, not reference: the map above creates a
-                      // NEW object, so `c.tool === exists` fails on the second
-                      // beat and the chain (the render source) freezes at the
-                      // first preview — the "10s pulse but no 20s/30s" bug.
-                      chain = chain.map((c) =>
-                        c.kind === "tool" && c.tool.name === tname && c.tool.durationMs === undefined
-                          ? { ...c, tool: { ...c.tool, preview: beatPreview } }
-                          : c
+                      const updated = { ...exists, preview: beatPreview };
+                      toolEvents = toolEvents.map((tool) => (tool === exists ? updated : tool));
+                      // Keep tools[] and the ordered chain pointing at the same
+                      // object, so repeated same-name calls update only this
+                      // in-flight call and every later heartbeat still matches.
+                      chain = chain.map((segment) =>
+                        segment.kind === "tool" && segment.tool === exists
+                          ? { ...segment, tool: updated }
+                          : segment
                       );
                       bumpLive({ tools: toolEvents, chain });
                     }
@@ -1476,7 +1664,7 @@ export default function ChatPage() {
                       toolCount,
                       chain,
                       phase: "tools",
-                      stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount },
+                      stats: { ...(currentLive.stats ?? { toolCount: 0, failedTools: 0, startedAt }), toolCount, failedTools: failedCount },
                     });
                   }
                 }
@@ -1484,7 +1672,7 @@ export default function ChatPage() {
               }
               case "tool.started": {
                 const tname = (payload as any).tool_name ?? "tool";
-                dbg("sse", `tool.started name=${tname}`, { sessionId, phase: liveRef.current.phase });
+                dbg("sse", `tool.started name=${tname}`, { sessionId, phase: currentLive.phase });
                 if (tname === "_thinking") break;
                 const exists = toolEvents.find((t) => t.name === tname && t.durationMs === undefined);
                 let te: ToolEvent | null = null;
@@ -1498,65 +1686,76 @@ export default function ChatPage() {
                   toolEvents = [...toolEvents, te];
                   toolCount += 1;
                 } else {
-                  toolEvents = toolEvents.map((t) =>
-                    t === exists
-                      ? {
-                          ...t,
-                          preview: (payload as any).preview ?? t.preview,
-                          args: (payload as any).args !== undefined ? JSON.stringify((payload as any).args).slice(0, 2000) : t.args,
-                        }
-                      : t
+                  const updated: ToolEvent = {
+                    ...exists,
+                    preview: (payload as any).preview ?? exists.preview,
+                    args: (payload as any).args !== undefined ? JSON.stringify((payload as any).args).slice(0, 2000) : exists.args,
+                  };
+                  toolEvents = toolEvents.map((tool) => (tool === exists ? updated : tool));
+                  chain = chain.map((segment) =>
+                    segment.kind === "tool" && segment.tool === exists
+                      ? { ...segment, tool: updated }
+                      : segment
                   );
-                  te = exists;
+                  te = updated;
+                }
+                if (te && !chain.some((segment) => segment.kind === "tool" && segment.tool === te)) {
+                  chain = [...chain, { kind: "tool", tool: te }];
                 }
                 bumpLive({
                   tools: toolEvents,
                   toolCount,
                   // Ensure the tool is in the ordered chain even if a
-                  // tool.started raced ahead of tool.progress.
-                  chain: te && !chain.some((c) => c.kind === "tool" && c.tool === te)
-                    ? (chain = [...chain, { kind: "tool", tool: te }])
-                    : chain,
+                  // tool.started raced ahead of tool.progress, and update the
+                  // existing segment when started supplies richer args.
+                  chain,
                   phase: "tools",
-                  stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount },
+                  stats: { ...(currentLive.stats ?? { toolCount: 0, failedTools: 0, startedAt }), toolCount, failedTools: failedCount },
                 });
                 break;
               }
               case "tool.completed": {
                 const tname = (payload as any).tool_name ?? "tool";
                 const isErr = !!(payload as any).is_error;
-                const durMs = (payload as any).duration !== undefined ? (payload as any).duration * 1000 : Date.now() - (toolEvents.find((t) => t.name === tname)?.startedAt ?? Date.now());
+                const durMs = (payload as any).duration !== undefined ? (payload as any).duration * 1000 : Date.now() - (toolEvents.find((t) => t.name === tname && (t.durationMs === undefined || t.interrupted))?.startedAt ?? Date.now());
                 dbg("sse", `tool.completed name=${tname} err=${isErr} durMs=${Math.round(durMs)}`, { sessionId });
-                toolEvents = toolEvents.map((t) =>
-                  t.name === tname && (t.durationMs === undefined || t.interrupted)
-                    ? { ...t, durationMs: durMs, error: isErr, interrupted: false }
-                    : t
-                );
+                toolEvents = completeFirstMatchingTool(toolEvents, tname, (tool) => ({
+                  ...tool,
+                  durationMs: durMs,
+                  error: isErr,
+                  interrupted: false,
+                }));
                 if (isErr) failedCount += 1;
-                // Sync the same completion into the ordered chain's tool segment.
-                chain = chain.map((c) =>
-                  c.kind === "tool" && c.tool.name === tname && (c.tool.durationMs === undefined || c.tool.interrupted)
-                    ? { ...c, tool: { ...c.tool, durationMs: durMs, error: isErr, interrupted: false } }
-                    : c
-                );
-                bumpLive({ tools: toolEvents, failedCount, chain, stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
+                // Complete only the oldest matching in-flight call. Several
+                // same-name tools may overlap; one completion frame must never
+                // turn every matching chip into done.
+                chain = completeFirstMatchingToolInChain(chain, tname, (tool) => ({
+                  ...tool,
+                  durationMs: durMs,
+                  error: isErr,
+                  interrupted: false,
+                }));
+                bumpLive({ tools: toolEvents, failedCount, chain, stats: { ...(currentLive.stats ?? { toolCount: 0, failedTools: 0, startedAt }), toolCount, failedTools: failedCount } });
                 break;
               }
               case "tool.failed": {
                 const tname = (payload as any).tool_name ?? "tool";
                 dbg("sse", `tool.failed name=${tname}`, { sessionId });
-                toolEvents = toolEvents.map((t) =>
-                  t.name === tname && (t.durationMs === undefined || t.interrupted)
-                    ? { ...t, durationMs: Date.now() - t.startedAt, error: true, interrupted: false }
-                    : t
-                );
+                const failedAt = Date.now();
+                toolEvents = completeFirstMatchingTool(toolEvents, tname, (tool) => ({
+                  ...tool,
+                  durationMs: failedAt - tool.startedAt,
+                  error: true,
+                  interrupted: false,
+                }));
                 failedCount += 1;
-                chain = chain.map((c) =>
-                  c.kind === "tool" && c.tool.name === tname && (c.tool.durationMs === undefined || c.tool.interrupted)
-                    ? { ...c, tool: { ...c.tool, durationMs: Date.now() - c.tool.startedAt, error: true, interrupted: false } }
-                    : c
-                );
-                bumpLive({ tools: toolEvents, failedCount, chain, stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), toolCount, failedTools: failedCount } });
+                chain = completeFirstMatchingToolInChain(chain, tname, (tool) => ({
+                  ...tool,
+                  durationMs: failedAt - tool.startedAt,
+                  error: true,
+                  interrupted: false,
+                }));
+                bumpLive({ tools: toolEvents, failedCount, chain, stats: { ...(currentLive.stats ?? { toolCount: 0, failedTools: 0, startedAt }), toolCount, failedTools: failedCount } });
                 break;
               }
               case "assistant.completed": {
@@ -1564,7 +1763,8 @@ export default function ChatPage() {
                 dbg("sse", `assistant.completed contentLen=${content?.length ?? 0} tools=${toolEvents.length}`, { sessionId, toolCount, failedCount });
                 if (content) {
                   full = content;
-                  setStreamedText(content);
+                  if (sessionId) getModuleLive(sessionId).streamedText = content;
+                  if (activeIdRef.current === sessionId) setStreamedText(content);
                   // Settle any tool that hasn't received its completion yet —
                   // tool.completed frames can race behind assistant.completed.
                   // Freeze the FINAL message with settled tools so its chips
@@ -1580,7 +1780,7 @@ export default function ChatPage() {
                   finalSegments = chain.map((c) =>
                     c.kind === "reasoning"
                       ? { kind: "reasoning" as const, text: c.text }
-                      : { kind: "tools" as const, calls: [{ name: c.tool.name, args: c.tool.args, result: undefined, error: c.tool.error, durationMs: c.tool.durationMs }] }
+                      : { kind: "tools" as const, calls: [{ name: c.tool.name, args: c.tool.args, result: undefined, error: c.tool.error, durationMs: c.tool.durationMs, interrupted: c.tool.interrupted }] }
                   );
                   finalToolCalls = toolEvents.map((t) => ({
                     name: t.name,
@@ -1588,8 +1788,9 @@ export default function ChatPage() {
                     result: undefined,
                     error: t.error,
                     durationMs: t.durationMs,
+                    interrupted: t.interrupted,
                   }));
-                  setMessages((m) => {
+                  if (activeIdRef.current === sessionId) setMessages((m) => {
                     const copy = [...m];
                     const last = copy[copy.length - 1];
                     if (last?.role === "assistant") {
@@ -1612,11 +1813,10 @@ export default function ChatPage() {
                     return copy;
                   });
                   assistantAppended = true;
-                  bumpRunGen(sessionId);
                   if (sessionId) moduleFinalAppended[sessionId] = true;
                 }
                 runRuntime = (payload as any).runtime ?? runRuntime;
-                bumpLive({ phase: "streaming", stats: { ...(liveRef.current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }), runtime: runRuntime } });
+                bumpLive({ phase: "streaming", stats: { ...(currentLive.stats ?? { toolCount: 0, failedTools: 0, startedAt }), runtime: runRuntime } });
                 break;
               }
               case "run.completed": {
@@ -1663,7 +1863,7 @@ export default function ChatPage() {
                 // tools, but if any tool.completed frame arrived between,
                 // refresh the chips with the latest durations/errors so the
                 // message NEVER shows a spinner that can't update.
-                if (finalSegments.length > 0 || finalToolCalls.length > 0) {
+                if ((finalSegments.length > 0 || finalToolCalls.length > 0) && activeIdRef.current === sessionId) {
                   setMessages((prev) => {
                     const copy = [...prev];
                     for (let i = copy.length - 1; i >= 0; i--) {
@@ -1682,7 +1882,7 @@ export default function ChatPage() {
                 // Attach per-message stats to the final assistant bubble so the
                 // model + token count show at the end of the message (replaces
                 // the old persistent footer bar).
-                setMessages((prev) => {
+                if (activeIdRef.current === sessionId) setMessages((prev) => {
                   const copy = [...prev];
                   for (let i = copy.length - 1; i >= 0; i--) {
                     if (copy[i].role === "assistant") {
@@ -1704,6 +1904,7 @@ export default function ChatPage() {
                 break;
               }
               case "error": {
+                terminalFailure = true;
                 throw new Error((payload as any).error ?? (payload as any).message ?? "Stream error");
               }
             }
@@ -1713,99 +1914,111 @@ export default function ChatPage() {
           clearInterval(stallTimer);
         }
       } catch (e: any) {
-        if (e?.name !== "AbortError") {
-          setError(e instanceof Error ? e.message : String(e));
-          setLive((prev) => ({ ...prev, phase: "error" }));
+        const transportOnly = sawRunEvent && !terminalFailure;
+        if (e?.name !== "AbortError" && !transportOnly) {
+          terminalFailure = true;
+          if (activeIdRef.current === sessionId) setError(e instanceof Error ? e.message : String(e));
+          bumpLive({ phase: "error" });
+        } else if (transportOnly || e?.name === "AbortError") {
+          dbg("stream", "reader detached without terminal evidence — preserving run", {
+            sessionId,
+            reason: abort.signal.reason ?? e?.name,
+          });
         }
       } finally {
-        // If the user switched to a different conversation mid-run, don't
-        // clobber the newly active session's display state — the stream that
-        // just ended belongs to the ORIGINAL session (sessionId), and its live
-        // state was already saved in liveBySessionRef when they navigated away.
-        // reattachRun restores it when they come back.
-        const stillViewing = activeIdRef.current === sessionId;
+        // A browser reader ending is not proof that the laptop agent ended.
+        // Reconcile persisted history first, then settle only on an explicit
+        // terminal frame, a final assistant message, or a user stop.
+        const stillViewing = mountedRef.current && activeIdRef.current === sessionId;
+        const readerSeqAtClose = readerLastSeq;
+        const explicitlyStopped = abort.signal.reason === "user-stop";
         dbg("stream", `stream closed (finally) stillViewing=${stillViewing} completedCleanly=${completedCleanly} assistantAppended=${assistantAppended} stalled=${stalled}`, { sessionId, toolCount, failedCount, lastEventAgoMs: Date.now() - lastEventAt });
-        setBusy(false);
-        if (stillViewing) setStreamedText("");
-        if (sessionId) {
-          getModuleLive(sessionId).busy = false;
-        }
-        if (streamSessionRef.current === sessionId) {
-          streamSessionRef.current = null;
-        }
-        streamAbort.current = null;
-        // Ensure the run settles to "done" even if the SSE tail (run.completed
-        // with usage/runtime) was dropped through the proxy chain — the footer
-        // should always appear with whatever stats we captured. Settle the
-        // MODULE snapshot too (even when the user navigated away) so returning
-        // to this conversation never shows spinning tools.
-        const settle = (prev: LiveState): LiveState => {
-          if (prev.phase === "error") return prev;
-          const now = Date.now();
-          const tools = prev.tools.map((t) => settleTool(t, now));
-          const chain = prev.chain.map((c) => settleToolInChain(c, now));
-          return {
-            ...prev,
-            tools,
-            chain,
-            phase: "done",
-            stats: {
-              ...(prev.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }),
-              completedAt: now,
-              durationMs: now - (prev.stats?.startedAt ?? now),
-            },
-          };
-        };
-        if (stillViewing) {
-          setLive((prev) => {
-            const settled = settle(prev);
-            dbg("settle", "finally settle (stillViewing)", { before: liveSnap(prev), after: liveSnap(settled) });
-            // Persist the last run's stats so the permanent footer keeps showing
-            // them after the run settles (idle state otherwise clears them).
-            if (settled.stats) setLastStats(settled.stats);
-            // Module mirror: keep the settled chain/tools/stats across unmount.
-            if (sessionId) {
-              const m = getModuleLive(sessionId);
-              m.live = settled;
-              m.streamSession = null;
-            }
-            return settled;
-          });
-        } else if (sessionId) {
-          // User navigated away mid-run — settle the module snapshot so
-          // returning never shows infinite spinners.
-          const m = getModuleLive(sessionId);
-          dbg("settle", "finally settle (navigated away — module snapshot)", { sessionId, before: liveSnap(m.live) });
-          m.live = settle(m.live);
-          dbg("settle", "module settled", { sessionId, after: liveSnap(m.live) });
-          m.streamSession = null;
-          liveBySessionRef.current[sessionId] = { live: m.live, streamedText: m.streamedText };
-        }
-        // Reconcile against ground truth ONLY when the SSE tail was dropped
-        // (run.completed never arrived). When it did arrive, the local message
-        // list + stats are already correct — reloading here would replace the
-        // whole array and force every bubble to re-render (the "full screen
-        // refresh" feel on mobile). Skip it for a clean completion.
+
+        let reconciled: ChatMsg[] = [];
         if (!completedCleanly || !assistantAppended) {
           try {
             dbg("stream", "safety-net loadMessages (tail dropped or answer missing)", { sessionId, completedCleanly, assistantAppended });
-            if (sessionId) await loadMessages(sessionId);
+            if (sessionId) reconciled = await loadMessages(sessionId, false, false);
           } catch {
             /* best-effort */
           }
         }
-        await loadSessions();
+        const lastPersisted = reconciled[reconciled.length - 1];
+        const historyFinished =
+          lastPersisted?.role === "assistant" &&
+          lastPersisted.content.trim().length > 0 &&
+          (reconciled.length > baselineMessageCount || lastPersisted.content !== baselineLastAssistant);
+        const confirmedFinished =
+          completedCleanly || assistantAppended || explicitlyStopped || terminalFailure || historyFinished;
+        runFinished = confirmedFinished;
 
-        // Flush any queued messages now that the run is done.
-        busyRef.current = false; // ensure the flush send() isn't seen as busy
-        const queued = pendingQueue.current.splice(0);
-        for (const q of queued) {
-          setMessages((m) => m.filter((x) => !(x.role === "system" && x.content.includes("Queued — waiting"))));
-          await send(q);
+        if (sessionId) {
+          const snapshot = getModuleLive(sessionId);
+          const newerReaderAdvanced = snapshot.lastSeq > readerSeqAtClose;
+          if (newerReaderAdvanced) {
+            // A remounted page already replayed newer frames while this old
+            // reader was awaiting reconciliation. Never overwrite that newer
+            // module snapshot with the detached reader's stale accumulator.
+            currentLive = snapshot.live;
+            full = snapshot.streamedText;
+          } else if (confirmedFinished) {
+            snapshot.streamSession = null;
+            currentLive = terminalFailure
+              ? { ...settleLiveState(currentLive), phase: "error" }
+              : settleLiveState(currentLive);
+            snapshot.live = currentLive;
+            snapshot.busy = false;
+            snapshot.streamedText = full;
+          } else {
+            // Transport loss / page unmount / stall watchdog: preserve the
+            // exact in-flight snapshot and let mount/focus/poll reattach from
+            // the latest seq. Never fabricate done or clear partial text.
+            snapshot.live = currentLive;
+            snapshot.busy = true;
+            snapshot.streamedText = full;
+          }
+          liveBySessionRef.current[sessionId] = {
+            live: snapshot.live,
+            streamedText: snapshot.streamedText,
+          };
+        }
+
+        if (stillViewing) {
+          if (confirmedFinished) {
+            if (reconciled.length > 0) {
+              messagesRef.current = reconciled;
+              setMessages(reconciled);
+            }
+            setBusy(false);
+            setStreamedText("");
+            setLive(currentLive);
+          } else {
+            setBusy(true);
+            setLive(currentLive);
+            setStreamedText(full);
+          }
+        }
+        if (streamSessionRef.current === sessionId) streamSessionRef.current = null;
+        if (streamAbort.current === abort) {
+          streamAbort.current = null;
+          primaryStreamSessionRef.current = null;
+        }
+        if (stillViewing) await loadSessions();
+
+        if (confirmedFinished && mountedRef.current) {
+          // A queued turn must not launch merely because the viewer detached.
+          busyRef.current = false;
+          const queued = pendingQueue.current.splice(0);
+          for (const q of queued) {
+            if (stillViewing) {
+              setMessages((current) => current.filter((message) => !(message.role === "system" && message.content.includes("Queued — waiting"))));
+            }
+            await send(q);
+          }
         }
       }
 
-      if (voiceOn && full) {
+      if (runFinished && mountedRef.current && voiceOn && full) {
         try {
           const synth = window.speechSynthesis;
           const utter = new SpeechSynthesisUtterance(full.replace(/[#*`>]/g, "").slice(0, 400));
@@ -1841,12 +2054,13 @@ export default function ChatPage() {
   // the chain, tools, and seq state. Returning restores the run mid-flight
   // exactly as it was — no rebuild, no refresh.
   const lastSeqRef = useRef(lastSeqState);
-  const reattachAbort = useRef<AbortController | null>(null);
   // A component instance must not leave orphaned readers behind after SPA
   // navigation. Disconnecting these browser readers does not cancel Hermes'
   // server-side run; the next instance resumes from the persisted seq.
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       streamAbort.current?.abort();
       reattachAbort.current?.abort();
     };
@@ -1865,8 +2079,13 @@ export default function ChatPage() {
     async (sessionId: string) => {
       if (!sessionId) return;
       dbg("reattach", `reattachRun START since=${lastSeqRef.current[sessionId] ?? getModuleLive(sessionId).lastSeq ?? 0}`, { sessionId, streamSession: streamSessionRef.current, busyRef: busyRef.current });
-      // Don't double-attach if we're already streaming this session.
-      if (streamSessionRef.current === sessionId && busyRef.current) return;
+      // Don't double-attach to either the primary POST reader or an existing
+      // tail reader. React's busy state can lag the ownership marker by a
+      // render, so the marker alone is authoritative here.
+      if (
+        streamSessionRef.current === sessionId ||
+        primaryStreamSessionRef.current === sessionId
+      ) return;
       // Serialize concurrent reattaches: if one is already in flight for this
       // session, drop the duplicate. This also fixes the since=3/since=7 race
       // — the blocked caller never issues a second GET /events, so the cursor
@@ -1882,6 +2101,10 @@ export default function ChatPage() {
       const attachAbort = new AbortController();
       reattachAbort.current = attachAbort;
       const m = getModuleLive(sessionId);
+      const baselineMessageCount = messagesRef.current.length;
+      const baselineLastAssistant = [...messagesRef.current]
+        .reverse()
+        .find((message) => message.role === "assistant")?.content;
       // React state updaters may run after several replay frames have already
       // been parsed. Keep a synchronous module accumulator so a burst like
       // reasoning → tool → completion → final cannot read a stale prior frame.
@@ -1909,6 +2132,7 @@ export default function ChatPage() {
         // finished run (or one that rotated away on compression) leaves the
         // UI stuck on "busy + loading tools" forever.
         streamSessionRef.current = sessionId;
+        m.streamSession = sessionId;
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -1928,27 +2152,60 @@ export default function ChatPage() {
               continue;
             }
             if (!payload.event) payload = { ...payload, event };
-            lastSeqRef.current[sessionId] = payload.seq ?? lastSeqRef.current[sessionId] ?? 0;
-            m.lastSeq = lastSeqRef.current[sessionId];
-            // First real event → now we know the run is live; restore the
-            // pre-existing state and go busy.
+            if (typeof payload.seq === "number" && Number.isFinite(payload.seq)) {
+              lastSeqRef.current[sessionId] = Math.max(
+                lastSeqRef.current[sessionId] ?? 0,
+                payload.seq
+              );
+              m.lastSeq = lastSeqRef.current[sessionId];
+            }
+            // First real event proves the run is live. A run.started frame (or
+            // any live frame after an idle/terminal snapshot) begins a fresh
+            // generation; never append a new run to the previous answer/chain.
             const terminalFrame = payload.event === "run.completed" || payload.event === "done" || payload.event === "error";
             if (!livePhase && !terminalFrame) {
               livePhase = true;
               dbg("reattach", `first frame event=${payload.event} seq=${payload.seq} — restoring live state`, { sessionId });
-              setBusy(true);
               m.busy = true;
+              if (activeIdRef.current === sessionId) setBusy(true);
               const prev = liveBySessionRef.current[sessionId]?.live ?? m.live;
-              if (prev && prev.phase !== "idle" && prev.phase !== "done" && prev.phase !== "error") {
+              const startsFresh =
+                payload.event === "run.started" ||
+                !prev ||
+                prev.phase === "idle" ||
+                prev.phase === "done" ||
+                prev.phase === "error";
+              if (startsFresh) {
+                bumpRunGen(sessionId);
+                m.streamedText = "";
+                const resumed: LiveState = {
+                  ...IDLE_LIVE,
+                  phase: payload.event === "run.started" ? "initializing" : "thinking",
+                  stats: {
+                    toolCount: 0,
+                    failedTools: 0,
+                    startedAt: Date.now(),
+                    runtime: payload.runtime ?? null,
+                    usage: null,
+                  },
+                };
+                commitReattachLive(() => resumed);
+                if (activeIdRef.current === sessionId) setStreamedText("");
+              } else if (activeIdRef.current === sessionId) {
                 setLive(prev);
-              } else {
-                const resumed = { ...(prev ?? IDLE_LIVE), phase: "thinking" as const };
-                m.live = resumed;
-                setLive(resumed);
               }
             }
-            if (payload.event === "run.started" || payload.event === "message.started") {
-              commitReattachLive((p) => ({ ...p, phase: "thinking" as const }));
+            if (payload.event === "run.started") {
+              commitReattachLive((current) => ({
+                ...current,
+                phase: "initializing" as const,
+                stats: {
+                  ...(current.stats ?? { toolCount: 0, failedTools: 0, startedAt: Date.now() }),
+                  runtime: payload.runtime ?? current.stats?.runtime ?? null,
+                },
+              }));
+            } else if (payload.event === "message.started") {
+              commitReattachLive((current) => ({ ...current, phase: "thinking" as const }));
             } else if (payload.event === "assistant.delta") {
               livePhase = true;
               const prevText = liveBySessionRef.current[sessionId]?.streamedText ?? m.streamedText ?? "";
@@ -1997,11 +2254,11 @@ export default function ChatPage() {
                   }
                 }
                 const chain = p.chain.map((c) =>
-                  c.kind === "tool" && c.tool.name === tname && c.tool.durationMs === undefined
+                  c.kind === "tool" && exists && c.tool === exists
                     ? { ...c, tool: te }
                     : c
                 );
-                const chainHas = chain.some((c) => c.kind === "tool" && c.tool.name === tname && c.tool.durationMs === undefined);
+                const chainHas = chain.some((c) => c.kind === "tool" && c.tool === te);
                 return {
                   ...p,
                   phase: "tools" as const,
@@ -2015,16 +2272,19 @@ export default function ChatPage() {
               if (tname === "_thinking") continue;
               const isErr = payload.event === "tool.failed" || !!payload.is_error;
               commitReattachLive((p) => {
-                const tools = p.tools.map((t) =>
-                  t.name === tname && (t.durationMs === undefined || t.interrupted)
-                    ? { ...t, durationMs: (payload.duration ?? 0) * 1000, error: isErr, interrupted: false }
-                    : t
-                );
-                const chain = p.chain.map((c) =>
-                  c.kind === "tool" && c.tool.name === tname && (c.tool.durationMs === undefined || c.tool.interrupted)
-                    ? { ...c, tool: { ...c.tool, durationMs: (payload.duration ?? 0) * 1000, error: isErr, interrupted: false } }
-                    : c
-                );
+                const durationMs = (payload.duration ?? 0) * 1000;
+                const tools = completeFirstMatchingTool(p.tools, tname, (tool) => ({
+                  ...tool,
+                  durationMs,
+                  error: isErr,
+                  interrupted: false,
+                }));
+                const chain = completeFirstMatchingToolInChain(p.chain, tname, (tool) => ({
+                  ...tool,
+                  durationMs,
+                  error: isErr,
+                  interrupted: false,
+                }));
                 return { ...p, tools, chain, failedCount: p.failedCount + (isErr ? 1 : 0) };
               });
             } else if (payload.event === "assistant.completed") {
@@ -2092,7 +2352,6 @@ export default function ChatPage() {
               m.busy = false;
               m.streamSession = null;
               if (activeIdRef.current === sessionId) {
-                setLastStats(m.live.stats);
                 setBusy(false);
               }
               if (streamSessionRef.current === sessionId) streamSessionRef.current = null;
@@ -2152,15 +2411,23 @@ export default function ChatPage() {
           // only settle if the current turn has a persisted final assistant
           // answer (or assistant.completed was already observed). Otherwise
           // preserve busy/phase and let the session poll reattach again.
-          const reconciled = await loadMessages(sessionId, false);
+          const reconciled = await loadMessages(sessionId, false, false);
           const lastPersisted = reconciled[reconciled.length - 1];
           const finishedEvidence =
             moduleFinalAppended[sessionId] === true ||
-            (lastPersisted?.role === "assistant" && lastPersisted.content.trim().length > 0);
+            (lastPersisted?.role === "assistant" &&
+              lastPersisted.content.trim().length > 0 &&
+              (reconciled.length > baselineMessageCount || lastPersisted.content !== baselineLastAssistant));
           if (finishedEvidence) {
             m.busy = false;
             commitReattachLive((p) => settleLiveState(p));
-            if (activeIdRef.current === sessionId) setBusy(false);
+            if (activeIdRef.current === sessionId) {
+              if (reconciled.length > 0) {
+                messagesRef.current = reconciled;
+                setMessages(reconciled);
+              }
+              setBusy(false);
+            }
           } else {
             m.busy = true;
             if (activeIdRef.current === sessionId) setBusy(true);
@@ -2187,9 +2454,13 @@ export default function ChatPage() {
           });
           // Reconcile the messages from the server so any final answer that
           // landed while we were away shows up.
-          await loadMessages(sessionId).catch(() => {});
+          const reconciled = await loadMessages(sessionId, false, false).catch(() => [] as ChatMsg[]);
+          if (activeIdRef.current === sessionId && reconciled.length > 0) {
+            messagesRef.current = reconciled;
+            setMessages(reconciled);
+          }
         }
-        if (!attachAbort.signal.aborted && streamSessionRef.current === sessionId) {
+        if (streamSessionRef.current === sessionId) {
           streamSessionRef.current = null;
           m.streamSession = null;
         }
@@ -2204,6 +2475,7 @@ export default function ChatPage() {
         }
         if (!attachAbort.signal.aborted && streamSessionRef.current === sessionId) {
           streamSessionRef.current = null;
+          m.streamSession = null;
         }
       } finally {
         if (reattachAbort.current === attachAbort) reattachAbort.current = null;
@@ -2225,6 +2497,7 @@ export default function ChatPage() {
       // Reattach if the session is live OR its snapshot is still un-settled —
       // the latter catches finished runs whose tools never got settled.
       if ((sess?.is_active || snapActive) && streamSessionRef.current !== activeId) {
+        if (sess?.is_active) reattachNoopAt.current[activeId] = 0;
         void reattachRun(activeId);
       }
     }
@@ -2250,6 +2523,7 @@ export default function ChatPage() {
       const snap = moduleLive[activeId];
       const snapActive = snap && snap.live.phase !== "idle" && snap.live.phase !== "done";
       if ((sess?.is_active || snapActive) && streamSessionRef.current !== activeId) {
+        if (sess?.is_active) reattachNoopAt.current[activeId] = 0;
         void reattachRun(activeId);
       }
     }
@@ -2366,16 +2640,26 @@ export default function ChatPage() {
     if (activeId) {
       liveBySessionRef.current[activeId] = { live, streamedText };
     }
+    activeIdRef.current = id;
     setActiveId(id);
+    messagesRef.current = [];
     setMessages([]);
     setStreamedText("");
     setLive(IDLE_LIVE);
+    setInput(draftsRef.current[id] ?? "");
     // Restore this session's live state if it has one (background stream).
     const saved = liveBySessionRef.current[id];
     if (saved) {
       setLive(saved.live);
       setStreamedText(saved.streamedText);
     }
+    const targetSnapshot = moduleLive[id];
+    setBusy(
+      !!targetSnapshot?.busy &&
+      targetSnapshot.live.phase !== "idle" &&
+      targetSnapshot.live.phase !== "done" &&
+      targetSnapshot.live.phase !== "error"
+    );
     // Await the load so the sidebar doesn't briefly show the wrong conversation.
     void loadMessages(id);
     // If the session we switched INTO is live — OR its module snapshot is
@@ -2385,6 +2669,7 @@ export default function ChatPage() {
     const snap = moduleLive[id];
     const snapActive = snap && snap.live.phase !== "idle" && snap.live.phase !== "done";
     if (sess?.is_active || snapActive || liveBySessionRef.current[id]) {
+      if (sess?.is_active) reattachNoopAt.current[id] = 0;
       void reattachRun(id);
     }
     // On mobile the sidebar fills the whole view — close it after picking
@@ -2404,9 +2689,11 @@ export default function ChatPage() {
       const list = await loadSessions();
       if (id === activeId) {
         if (list.length > 0) {
+          activeIdRef.current = list[0].id;
           setActiveId(list[0].id);
           loadMessages(list[0].id);
         } else {
+          activeIdRef.current = null;
           setActiveId(null);
           setMessages([]);
         }
@@ -2487,9 +2774,11 @@ export default function ChatPage() {
       const list = await loadSessions();
       if (selectedIds.has(activeId ?? "")) {
         if (list.length > 0) {
+          activeIdRef.current = list[0].id;
           setActiveId(list[0].id);
           loadMessages(list[0].id);
         } else {
+          activeIdRef.current = null;
           setActiveId(null);
           setMessages([]);
         }
@@ -2511,8 +2800,6 @@ export default function ChatPage() {
     // flag from a previous run on this session can't suppress a NEW run's
     // live bubble (bumpRunGen resets it on every send and session entry).
     if (activeId && isFinalAppendedForCurrentRun(activeId)) return null;
-    const showReasoning =
-      live.reasoning && settings.reasoning !== "hidden";
 
     const usingBrowser = live.tools.some(
       (t) =>
@@ -2898,12 +3185,14 @@ export default function ChatPage() {
                   setStreamedText("");
                   setLive(IDLE_LIVE);
                   setBusy(false);
+                  activeIdRef.current = null;
                   setActiveId(null);
                   setSessionsLoading(true);
-                  loadSessions().then((list) => {
+                  loadSessions(undefined, next).then((list) => {
                     if (list.length > 0) {
+                      activeIdRef.current = list[0].id;
                       setActiveId(list[0].id);
-                      loadMessages(list[0].id);
+                      loadMessages(list[0].id, true, true, next);
                     } else {
                       setMessagesLoading(false);
                     }

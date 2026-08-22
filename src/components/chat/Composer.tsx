@@ -4,7 +4,7 @@
 // component instead of the whole page (sidebar + stats + messages). This is
 // the fix for the laggy textbox: keystrokes no longer re-render everything.
 
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Mic, MicOff, Send, Square, Maximize2, Minimize2, Volume2, Paperclip, X } from "lucide-react";
 import { SlashAutocomplete } from "./SlashAutocomplete";
 import { dbg } from "@/lib/chat-debug";
@@ -53,15 +53,26 @@ export const Composer = memo(function Composer({
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
-  // Keep high-frequency typing local. The page owns the durable per-session
-  // draft, but only receives it on send/expand or an external draft change;
-  // a keystroke no longer reconciles the sidebar + transcript + live chain.
+  // Keep high-frequency typing local. The page's per-session draft ref is
+  // updated without page state, so keystrokes do not reconcile the sidebar,
+  // transcript, or live chain; parent state syncs only for external editors.
   const [localInput, setLocalInput] = useState(input);
+  const syncedDraftKey = useRef(draftKey);
   const dropCount = useRef(0);
 
   useEffect(() => {
     setLocalInput(input);
-  }, [input, draftKey]);
+    // External edits (voice input / expanded composer) must update the durable
+    // draft too. On a conversation-key change, skip this write so an old
+    // prop value can never overwrite the newly selected session's draft.
+    if (syncedDraftKey.current === draftKey) onDraftChange(input);
+    syncedDraftKey.current = draftKey;
+  }, [input, draftKey, onDraftChange]);
+
+  const applyAutocomplete = useCallback((value: string) => {
+    setLocalInput(value);
+    onDraftChange(value);
+  }, [onDraftChange]);
 
   useEffect(() => {
     dbg("render", `Composer commit draftKey=${draftKey} chars=${localInput.length} busy=${busy}`);
@@ -141,10 +152,7 @@ export const Composer = memo(function Composer({
       }}
       onDrop={onDrop}
     >
-      <SlashAutocomplete input={localInput} onApply={(value) => {
-        setLocalInput(value);
-        onDraftChange(value);
-      }} />
+      <SlashAutocomplete input={localInput} onApply={applyAutocomplete} />
       <input
         ref={fileRef}
         type="file"
@@ -223,6 +231,7 @@ export const Composer = memo(function Composer({
       <button
         onClick={() => {
           setInput(localInput);
+          onDraftChange(localInput);
           setComposerExpanded((v) => !v);
         }}
         disabled={false}

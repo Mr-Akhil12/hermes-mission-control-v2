@@ -21,11 +21,12 @@ export function useSessions({ setError }: UseSessionsOptions) {
   const [profile, setProfile] = useState<string>("");
 
   const loadSessions = useCallback(
-    async (source?: SessionFilter) => {
+    async (source?: SessionFilter, profileOverride?: string) => {
       try {
         const src = source ?? sessionFilter;
         const qs = src === "all" ? "?source=all" : "?source=dashboard";
-        const profileQs = profile ? `&profile=${encodeURIComponent(profile)}` : "";
+        const selectedProfile = profileOverride ?? profile;
+        const profileQs = selectedProfile ? `&profile=${encodeURIComponent(selectedProfile)}` : "";
         const res = await fetch(`/api/chat/sessions${qs}${profileQs}`, { cache: "no-store" });
         const data = await res.json();
         const list: SessionMeta[] = data?.data ?? data?.sessions ?? [];
