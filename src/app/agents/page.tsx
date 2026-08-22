@@ -6,6 +6,7 @@ import {
   AlertCircle, RefreshCw, ArrowUpRight, Cpu, GitBranch, Zap, CheckCircle2, XCircle, Loader2,
 } from "lucide-react";
 import { fmtSASTRelative } from "@/lib/time";
+import { DEFAULT_MODEL } from "@/lib/models";
 
 type ProfileInfo = {
   name: string;
@@ -216,7 +217,7 @@ export default function AgentsPage() {
                   Default — orchestration, general work
                 </p>
                 <div className="mt-3 rounded-lg px-2 py-1 font-mono text-[11px]" style={{ background: "color-mix(in srgb, var(--bg) 60%, transparent)", color: "var(--text-faint)" }}>
-                  deepseek-v4-flash:0731
+                  {DEFAULT_MODEL}
                 </div>
               </div>
               {profiles.map((p) => (

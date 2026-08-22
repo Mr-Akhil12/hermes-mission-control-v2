@@ -6,6 +6,7 @@ export type ChatProfile = {
   id: string; // empty string = default profile
   label: string;
   role: string;
+  model?: string; // the profile's configured model (from config.yaml model.default)
 };
 
 // Static fallback list — used until the live /api/chat/profiles fetch

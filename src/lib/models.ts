@@ -9,6 +9,7 @@ export const CONTEXT_WINDOWS: Record<string, number> = {
   "minimax-m2.7": 204_800,
   "claude-sonnet-4": 1_000_000,
   "gpt-5.6-sol": 400_000,
+  "stealth/ox-alpha": 1_000_000,
 };
 
 export const CONTEXT_WINDOW_DEFAULT = 1_000_000;

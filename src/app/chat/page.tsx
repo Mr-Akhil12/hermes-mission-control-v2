@@ -435,6 +435,14 @@ export default function ChatPage() {
   // created via `hermes profile create` — e.g. ox-alpha). Merged with the
   // static fallback list; deduped by id, live list wins.
   const [extraProfiles, setExtraProfiles] = useState<ChatProfile[]>([]);
+
+  // The model a NEW session / stream should pin. When a multiplex profile is
+  // selected (ox-alpha, coder, ...), use THAT profile's configured model so
+  // the chat actually runs on the profile's brain — never the hardcoded
+  // default. Only the default profile (empty id) uses DEFAULT_MODEL.
+  const allProfiles: ChatProfile[] = extraProfiles.length > 0 ? extraProfiles : PROFILES;
+  const activeProfile = allProfiles.find((p) => p.id === profile);
+  const effectiveModel = activeProfile?.model || (profile ? "" : MODEL);
   const [restoreReady, setRestoreReady] = useState(false);
   const restoredSessionIdRef = useRef<string | null>(null);
   const initialReconcileStartedRef = useRef(false);
@@ -501,6 +509,13 @@ export default function ChatPage() {
       .then((d) => {
         if (cancelled) return;
         const live = (d?.profiles ?? []) as { name: string; description?: string; model?: string }[];
+        const byName = new Map(live.map((p) => [p.name, p]));
+        // Enrich every known profile with its live model (coder, verifier, …),
+        // and append any profile not in the static list (e.g. ox-alpha).
+        const merged = PROFILES.map((p) => {
+          const l = p.id ? byName.get(p.id) : undefined;
+          return l?.model ? { ...p, model: l.model } : p;
+        });
         const known = new Set(PROFILES.map((p) => p.id));
         const extras = live
           .filter((p) => p.name && !known.has(p.name))
@@ -511,8 +526,9 @@ export default function ChatPage() {
               .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
               .join(" "),
             role: p.description || (p.model ? `Model: ${p.model}` : "Custom profile"),
+            model: p.model || undefined,
           }));
-        if (!cancelled) setExtraProfiles(extras);
+        setExtraProfiles([...merged, ...extras]);
       })
       .catch(() => {
         /* state server unreachable — keep the static list */
@@ -578,7 +594,12 @@ export default function ChatPage() {
       }
       const list = data?.data ?? [];
       dbg("loadMessages", `GET /messages rows=${list.length} http=${res.status} profile=${profile ?? "default"}`, { sessionId: id });
-      const modelName = MODEL;
+      // Per-message model: prefer the session's ACTUAL model (the profile's
+      // real brain), falling back to the effective profile model, then the
+      // dashboard default. Never hardcode deepseek for a profile conversation.
+      const sessionRow = (data as any)?.session ?? (list as any[])[0]?.session;
+      const rowModel = sessionRow?.model ?? (data as any)?.model;
+      const modelName = typeof rowModel === "string" && rowModel ? rowModel : effectiveModel || MODEL;
       // The Hermes API persists each assistant fragment as its own row —
       // thinking text between tool calls, empty frames, and the final reply.
       // Live view shows one continuous reply; history must too. Merge
@@ -797,7 +818,7 @@ export default function ChatPage() {
     } finally {
       if (showLoading && applyToView && activeIdRef.current === id) setMessagesLoading(false);
     }
-  }, [profile]);
+  }, [profile, effectiveModel]);
 
   useEffect(() => {
     if (!restoreReady || initialReconcileStartedRef.current) return;
@@ -1009,7 +1030,7 @@ export default function ChatPage() {
         case "model": {
           if (!activeId) return true;
           if (!arg) {
-            setMessages((m) => [...m, { role: "system", content: `Usage: \`/model <name>\` — e.g. \`/model ${MODEL}\`. Model locks the session (runtime verified server-side).` }]);
+            setMessages((m) => [...m, { role: "system", content: `Usage: \`/model <name>\` — e.g. \`/model ${effectiveModel || MODEL}\`. Model locks the session (runtime verified server-side).` }]);
             return true;
           }
           try {
@@ -1040,7 +1061,7 @@ export default function ChatPage() {
           const sid = activeId ?? "—";
           const sess = sessions.find((s) => s.id === sid);
           const lastStats = liveRef.current.stats;
-          const model = lastStats?.runtime?.model ?? MODEL;
+          const model = lastStats?.runtime?.model ?? (effectiveModel || MODEL);
           const provider = lastStats?.runtime?.provider ?? "";
           if (cmd === "status") {
             const out = [
@@ -1314,11 +1335,12 @@ export default function ChatPage() {
           const res = await fetch("/api/chat/sessions", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            // Pin the session to the dashboard's model + profile. Without the
-            // model pin the API server persists its virtual model name
-            // ("hermes-agent") which beats the per-request model on every
-            // turn; the profile pin routes to that multiplex profile.
-            body: JSON.stringify({ model: MODEL, profile }),
+            // Pin the session to the active model + profile. For a multiplex
+            // profile (ox-alpha, coder, ...) use that profile's own model so
+            // the chat runs on its brain; for the default profile pin the
+            // dashboard default. Without a pin the API server persists its
+            // virtual model name which beats the per-request model.
+            body: JSON.stringify({ model: effectiveModel || undefined, profile }),
           });
           const data = await res.json();
           const id = data?.session?.id ?? data?.session_id ?? data?.data?.id;
@@ -1498,7 +1520,7 @@ export default function ChatPage() {
         const res = await fetch(`/api/chat/sessions/${sessionId}/stream`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: trimmed, model: MODEL, profile }),
+          body: JSON.stringify({ message: trimmed, model: effectiveModel || undefined, profile }),
           signal: abort.signal,
         });
         dbg("stream", `POST /stream http=${res.status}`, { sessionId, msgLen: trimmed.length });
@@ -2037,7 +2059,7 @@ export default function ChatPage() {
         }
       }
     },
-    [activeId, voiceOn, loadSessions, loadMessages, handleSlash, profile, attachments]
+    [activeId, voiceOn, loadSessions, loadMessages, handleSlash, profile, attachments, effectiveModel]
   );
 
   sendRef.current = send;
@@ -3202,7 +3224,7 @@ export default function ChatPage() {
                 style={{ borderColor: "var(--card-border)", color: "var(--accent-2)" }}
                 aria-label="Switch profile"
               >
-                {[...extraProfiles, ...PROFILES].map((p) => (
+                {allProfiles.map((p) => (
                   <option key={p.id || "default"} value={p.id}>
                     {p.label} — {p.role}
                   </option>
