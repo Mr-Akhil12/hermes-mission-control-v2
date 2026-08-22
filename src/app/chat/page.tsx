@@ -2,8 +2,9 @@
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
-  Send, Mic, MicOff, MessageSquare, Plus, ChevronLeft, ChevronRight,
+  Send, Mic, MicOff, Volume2, MessageSquare, Plus, ChevronLeft, ChevronRight,
   Loader2, Trash2, Pencil, Square, CheckSquare, X, Maximize2, Minimize2, Bot,
+  CheckCircle2, XCircle,
 } from "lucide-react";
 import type { ChatMsg, ChatSettings, StreamEvent, ToolEvent, ChainSegment, RunStats, ToolCallInfo, ChatSegment } from "@/lib/chat-types";
 import { useSessions } from "@/lib/use-sessions";
@@ -431,6 +432,20 @@ export default function ChatPage() {
   const draftsRef = useRef<Record<string, string>>({});
   const [composerExpanded, setComposerExpanded] = useState(false);
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  // Sidebar mode: "chats" = real conversations (most recent, no cron);
+  // "bots" = Grok-style contact list of multiplex profiles you can talk to
+  // individually, plus create-new-bot.
+  const [viewTab, setViewTab] = useState<"chats" | "bots">("chats");
+  const [newBotOpen, setNewBotOpen] = useState(false);
+  const [botForm, setBotForm] = useState({ name: "", description: "", model: "", provider: "openrouter" });
+  const [botCreating, setBotCreating] = useState(false);
+  const [botError, setBotError] = useState<string | null>(null);
+  const [delegations, setDelegations] = useState<
+    { id: string; state: string; role?: string | null; model?: string | null; goal?: string; dispatched_at?: number | null }[]
+  >([]);
+  // Assigned after loadMessages is declared so callbacks defined earlier
+  // (openBot) can invoke it without a TDZ error.
+  const loadMessagesRef = useRef<(id: string) => void>(() => {});
   // Live multiplex profiles from the state server (auto-shows any profile
   // created via `hermes profile create` — e.g. ox-alpha). Merged with the
   // static fallback list; deduped by id, live list wins.
@@ -538,10 +553,107 @@ export default function ChatPage() {
     };
   }, []);
 
-  // Restore the unsent draft for the newly active conversation.
+  // Fetch recent subagent delegations so the Chats view can show a "what my
+  // subagents did" rundown (the work they were assigned shows up here).
   useEffect(() => {
-    if (activeId) setInput(draftsRef.current[activeId] ?? "");
-  }, [activeId]);
+    let cancelled = false;
+    const load = () =>
+      fetch("/api/chat/delegations", { cache: "no-store" })
+        .then((r) => r.json())
+        .then((d) => {
+          if (!cancelled) setDelegations((d?.delegations ?? []).slice(0, 8));
+        })
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, []);
+
+  const createBot = useCallback(async () => {
+    const name = botForm.name.trim().toLowerCase();
+    if (!name || botCreating) return;
+    setBotCreating(true);
+    setBotError(null);
+    try {
+      const res = await fetch("/api/chat/profiles/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          description: botForm.description.trim(),
+          model: botForm.model.trim(),
+          provider: botForm.provider,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        setBotError(data.error ?? `create failed (${res.status})`);
+        return;
+      }
+      setBotForm({ name: "", description: "", model: "", provider: "openrouter" });
+      setNewBotOpen(false);
+      // Refresh the profile list so the new bot appears in the dropdown/contact list.
+      fetch("/api/chat/profiles", { cache: "no-store" })
+        .then((r) => r.json())
+        .then((d) => {
+          const live = (d?.profiles ?? []) as { name: string; description?: string; model?: string }[];
+          const byName = new Map(live.map((p) => [p.name, p]));
+          const merged = PROFILES.map((p) => {
+            const l = p.id ? byName.get(p.id) : undefined;
+            return l?.model ? { ...p, model: l.model } : p;
+          });
+          const known = new Set(PROFILES.map((p) => p.id));
+          const extras = live
+            .filter((p) => p.name && !known.has(p.name))
+            .map((p) => ({
+              id: p.name,
+              label: p.name
+                .split(/[-_]/)
+                .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+                .join(" "),
+              role: p.description || (p.model ? `Model: ${p.model}` : "Custom profile"),
+              model: p.model || undefined,
+            }));
+          setExtraProfiles([...merged, ...extras]);
+        })
+        .catch(() => {});
+    } catch (e) {
+      setBotError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBotCreating(false);
+    }
+  }, [botForm, botCreating]);
+
+  // Opening a bot (profile) in the chat — switches the profile, starts a
+  // fresh conversation for it, and routes future sends to /p/<profile>/.
+  const openBot = useCallback(
+    (botId: string) => {
+      if (botId === profile) return;
+      setProfile(botId);
+      setMessages([]);
+      setStreamedText("");
+      setLive(IDLE_LIVE);
+      setBusy(false);
+      setActiveId(null);
+      setSessionsLoading(true);
+      // Pass botId explicitly — setProfile is async and loadSessions reads
+      // profile from the hook state, which would still be the OLD profile.
+      loadSessions(undefined, botId).then((list) => {
+        if (list.length > 0) {
+          setActiveId(list[0].id);
+          // loadMessages is declared below; call it via the ref set at runtime.
+          loadMessagesRef.current(list[0].id);
+        } else {
+          setMessagesLoading(false);
+        }
+      });
+      if (window.innerWidth < 768) setSidebarOpen(false);
+    },
+    [profile, loadSessions, setProfile]
+  );
 
   // Restore the module-scoped live stream state when remounting this page
   // (after navigating to another tab). If the run is still going, reattach
@@ -819,6 +931,9 @@ export default function ChatPage() {
       if (showLoading && applyToView && activeIdRef.current === id) setMessagesLoading(false);
     }
   }, [profile, effectiveModel]);
+
+  // Wire the runtime ref used by earlier callbacks (openBot).
+  loadMessagesRef.current = loadMessages;
 
   useEffect(() => {
     if (!restoreReady || initialReconcileStartedRef.current) return;
@@ -3024,27 +3139,31 @@ export default function ChatPage() {
                 )}
               </div>
               <div className="flex gap-1 px-2 pb-1">
-                {(["chats", "all"] as const).map((f) => (
+                {(["chats", "bots"] as const).map((t) => (
                   <button
-                    key={f}
+                    key={t}
                     onClick={() => {
-                      setSessionFilter(f);
-                      setSessionsLoading(true);
-                      loadSessions(f);
+                      setViewTab(t);
+                      if (t === "chats") {
+                        setSessionFilter("chats");
+                        setSessionsLoading(true);
+                        loadSessions("chats");
+                      }
                     }}
                     className="flex-1 rounded-lg px-2 py-1 text-[10px] font-semibold uppercase tracking-wide"
                     style={
-                      sessionFilter === f
+                      viewTab === t
                         ? { background: "rgba(124,108,255,0.14)", color: "var(--accent)" }
                         : { color: "var(--text-faint)" }
                     }
                   >
-                    {f === "chats" ? "Chats" : "All"}
+                    {t === "chats" ? "Chats" : "Bots"}
                   </button>
                 ))}
               </div>
               <div className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2">
-                {sessionsLoading ? (
+                {viewTab === "chats" && (
+                sessionsLoading ? (
                   <SessionListSkeleton />
                 ) : (sessionFilter === "chats"
                     ? sessions.filter((s) => {
@@ -3186,6 +3305,143 @@ export default function ChatPage() {
                       )}
                     </div>
                   ))
+                ))}
+                {viewTab === "bots" && (
+                  <div className="space-y-1">
+                    <div className="mb-1 flex items-center justify-between px-1">
+                      <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: "var(--text-faint)" }}>
+                        My Bots
+                      </span>
+                      <button
+                        onClick={() => {
+                          setBotError(null);
+                          setNewBotOpen((v) => !v);
+                        }}
+                        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold"
+                        style={{ color: "var(--accent)", background: "rgba(124,108,255,0.10)" }}
+                      >
+                        <Plus className="h-3 w-3" /> New bot
+                      </button>
+                    </div>
+
+                    {newBotOpen && (
+                      <div className="mb-2 space-y-1.5 rounded-lg border p-2" style={{ borderColor: "var(--card-border)" }}>
+                        <input
+                          value={botForm.name}
+                          onChange={(e) => setBotForm((f) => ({ ...f, name: e.target.value }))}
+                          placeholder="bot name (e.g. coder)"
+                          className="w-full rounded border bg-transparent px-2 py-1 text-xs outline-none"
+                          style={{ borderColor: "var(--card-border)", color: "var(--text)" }}
+                          aria-label="Bot name"
+                        />
+                        <input
+                          value={botForm.description}
+                          onChange={(e) => setBotForm((f) => ({ ...f, description: e.target.value }))}
+                          placeholder="what is this bot for?"
+                          className="w-full rounded border bg-transparent px-2 py-1 text-xs outline-none"
+                          style={{ borderColor: "var(--card-border)", color: "var(--text)" }}
+                          aria-label="Bot description"
+                        />
+                        <input
+                          value={botForm.model}
+                          onChange={(e) => setBotForm((f) => ({ ...f, model: e.target.value }))}
+                          placeholder="model (e.g. deepseek-v4-flash:0731)"
+                          className="w-full rounded border bg-transparent px-2 py-1 text-xs outline-none"
+                          style={{ borderColor: "var(--card-border)", color: "var(--text)" }}
+                          aria-label="Bot model"
+                        />
+                        {botError && (
+                          <div className="text-[10px]" style={{ color: "var(--red)" }}>{botError}</div>
+                        )}
+                        <button
+                          onClick={createBot}
+                          disabled={botCreating || !botForm.name.trim()}
+                          className="flex w-full items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+                          style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-2))" }}
+                        >
+                          {botCreating ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
+                          {botCreating ? "Creating…" : "Create bot"}
+                        </button>
+                      </div>
+                    )}
+
+                    {allProfiles.map((p) => {
+                      const active = profile === p.id;
+                      return (
+                        <div
+                          key={p.id || "default"}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => openBot(p.id)}
+                          onKeyDown={(e) => e.key === "Enter" && openBot(p.id)}
+                          className="flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs"
+                          style={
+                            active
+                              ? { background: "rgba(124,108,255,0.14)", color: "var(--text)" }
+                              : { color: "var(--text-dim)" }
+                          }
+                        >
+                          <span
+                            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-bold uppercase"
+                            style={{
+                              background: active ? "var(--accent)" : "rgba(124,108,255,0.16)",
+                              color: active ? "#fff" : "var(--accent-2)",
+                            }}
+                          >
+                            {p.id ? p.id.charAt(0) : "H"}
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate font-semibold">{p.label}</span>
+                            <span className="block truncate text-[10px]" style={{ color: "var(--text-faint)" }}>
+                              {p.model || p.role}
+                            </span>
+                          </span>
+                          {active && (
+                            <span className="shrink-0 text-[9px] font-bold uppercase" style={{ color: "var(--accent)" }}>
+                              active
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {allProfiles.length === 0 && (
+                      <div className="px-2 py-4 text-xs" style={{ color: "var(--text-faint)" }}>
+                        No bots yet — create one with New bot.
+                      </div>
+                    )}
+
+                    {delegations.length > 0 && (
+                      <div className="mt-2 border-t pt-2" style={{ borderColor: "var(--card-border)" }}>
+                        <span className="px-1 text-[10px] font-semibold uppercase tracking-wide" style={{ color: "var(--text-faint)" }}>
+                          Subagent activity
+                        </span>
+                        {delegations.map((d) => (
+                          <div key={d.id} className="mt-1 rounded-lg border px-2 py-1.5" style={{ borderColor: "var(--card-border)" }}>
+                            <div className="flex items-center gap-1.5">
+                              {d.state === "completed" ? (
+                                <CheckCircle2 className="h-3 w-3 shrink-0" style={{ color: "var(--green)" }} />
+                              ) : d.state === "running" ? (
+                                <Loader2 className="h-3 w-3 shrink-0 animate-spin" style={{ color: "var(--accent)" }} />
+                              ) : (
+                                <XCircle className="h-3 w-3 shrink-0" style={{ color: "var(--text-faint)" }} />
+                              )}
+                              <span className="truncate text-[10px] font-semibold uppercase" style={{ color: "var(--text-dim)" }}>
+                                {(d.role || "subagent").toUpperCase()}
+                              </span>
+                              {d.model && (
+                                <span className="truncate font-mono text-[9px]" style={{ color: "var(--text-faint)" }}>
+                                  {d.model}
+                                </span>
+                              )}
+                            </div>
+                            <div className="mt-0.5 line-clamp-2 text-[10px] leading-relaxed" style={{ color: "var(--text-faint)" }}>
+                              {d.goal || "(no goal recorded)"}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
             </div>

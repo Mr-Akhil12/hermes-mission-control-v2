@@ -995,6 +995,59 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._json({"error": str(e)}, 502)
 
+    def _profile_create(self) -> None:
+        """POST /api/profiles/create — create a new Hermes multiplex profile
+        via `hermes profile create`. Body: {name, description?, clone_from?,
+        model?}. Runs on the host so the dashboard can spawn specialized
+        bots (the "Bots" tab) without SSH."""
+        import subprocess as _sp
+        import re as _re
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length else b"{}"
+            payload = json.loads(body or b"{}")
+        except Exception:
+            self._json({"error": "invalid JSON"}, 400)
+            return
+        name = str(payload.get("name") or "").strip().lower()
+        if not _re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", name):
+            self._json({"error": "profile name must be lowercase alphanumeric (2-32 chars)"}, 400)
+            return
+        desc = str(payload.get("description") or "").strip()
+        clone_from = str(payload.get("clone_from") or "").strip()
+        model = str(payload.get("model") or "").strip()
+        existing = HERMES / "profiles" / name
+        if existing.is_dir():
+            self._json({"error": f"profile '{name}' already exists"}, 409)
+            return
+        cmd = ["hermes", "profile", "create", name, "--no-skills"]
+        if desc:
+            cmd += ["--description", desc]
+        if clone_from:
+            cmd += ["--clone-from", clone_from]
+        try:
+            res = _sp.run(cmd, capture_output=True, text=True, timeout=120)
+        except Exception as exc:
+            self._json({"error": f"create failed: {exc}"}, 502)
+            return
+        if res.returncode != 0:
+            self._json({"error": res.stderr.strip() or res.stdout.strip() or "create failed"}, 502)
+            return
+        # If a model was requested, write it into the new profile's config
+        # (model.default + provider). Only when the user specified one.
+        if model and existing.is_dir():
+            cfg_path = existing / "config.yaml"
+            try:
+                lines = cfg_path.read_text().splitlines() if cfg_path.exists() else []
+                provider = str(payload.get("provider") or "").strip() or "openrouter"
+                # Ensure a `model:` block at the top with default + provider.
+                block = f"model:\n  default: {model}\n  provider: {provider}\n"
+                rest = "\n".join(lines) if lines else ""
+                cfg_path.write_text(block + rest)
+            except Exception:
+                pass
+        self._json({"ok": True, "name": name, "description": desc, "model": model or None})
+
     def do_POST(self):
         if not self._authorized():
             self._json({"error": "unauthorized"}, 401)
@@ -1055,6 +1108,10 @@ class Handler(BaseHTTPRequestHandler):
             # so the agent can read it with its file tools in the next turn.
             if path == "/api/chat/attach":
                 self._handle_attach()
+                return
+            # Profile creation — spawns a new multiplex bot profile.
+            if path == "/api/profiles/create":
+                self._profile_create()
                 return
             if path not in ("/v1/chat/completions", "/api/chat"):
                 self._json({"error": "not found"}, 404)
