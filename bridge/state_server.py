@@ -19,6 +19,7 @@ import json
 import os
 import queue
 import sqlite3
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -1237,7 +1238,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return f"⚠️ Status read failed: {e}"
 
-        if name == "memory" and arg.split()[0] in ("pending",):
+        if name == "memory" and (not arg or arg.split()[0] in ("pending",)):
             try:
                 pending_dir = f"{home}/pending_messages"
                 if not os.path.isdir(pending_dir):
@@ -1263,6 +1264,87 @@ class Handler(BaseHTTPRequestHandler):
                 )
             except Exception as e:
                 return f"⚠️ Curator read failed: {e}"
+
+        if name == "diff":
+            # Read-only git status + diff stat in the dashboard repo.
+            repo = os.getcwd()
+            try:
+                st = subprocess.run(
+                    ["git", "-C", repo, "status", "--short"],
+                    capture_output=True, text=True, timeout=20,
+                )
+                df = subprocess.run(
+                    ["git", "-C", repo, "diff", "--stat"],
+                    capture_output=True, text=True, timeout=20,
+                )
+                status_out = (st.stdout or "").strip()
+                diff_out = (df.stdout or "").strip()
+                lines = [f"**Git status — `{repo}`**", ""]
+                lines += status_out.splitlines()[:25] if status_out else ["(clean working tree)"]
+                if diff_out:
+                    lines += ["", "**Uncommitted diff**", ""] + diff_out.splitlines()[:15]
+                return "\n".join(lines)
+            except Exception as e:
+                return f"⚠️ Diff failed: {e}"
+
+        if name == "kanban":
+            # Read-only kanban views only. Mutating subcommands need a terminal.
+            sub = arg.split()[0] if arg else "list"
+            read_only = {"list", "ls", "boards", "show", "stats", "diagnostics", "diag", "context"}
+            if sub not in read_only:
+                return (
+                    f"`/kanban {sub}` is a write operation — run it in a terminal "
+                    f"(`hermes kanban {sub}`) so you can review before it changes the board."
+                )
+            try:
+                hermes_bin = os.path.expanduser("~/.hermes/hermes-agent/venv/bin/hermes")
+                if not os.path.exists(hermes_bin):
+                    hermes_bin = "hermes"
+                r = subprocess.run(
+                    [hermes_bin, "kanban", sub, *arg.split()[1:]],
+                    capture_output=True, text=True, timeout=30,
+                )
+                out = (r.stdout or r.stderr or "").strip()
+                if not out:
+                    return f"/kanban {sub}: no output (board may be empty)."
+                return out[:4000]
+            except Exception as e:
+                return f"⚠️ Kanban read failed: {e}"
+
+        if name == "reload-skills":
+            # Rescan skills on disk and report what changed. This process-local
+            # rescan shows newly added/removed skills; the gateway's own skill
+            # cache picks up changes on its next scan/reload.
+            import sys as _sys
+            try:
+                agent_root = os.path.expanduser("~/.hermes/hermes-agent")
+                if agent_root not in _sys.path:
+                    _sys.path.insert(0, agent_root)
+                from agent.skill_commands import reload_skills as _rs
+                result = _rs()
+                lines = ["**Skills rescan**", ""]
+                lines.append(f"- Total skills: {result.get('total', 0)}")
+                added = result.get("added", [])
+                removed = result.get("removed", [])
+                if added:
+                    lines.append(f"- Added: {', '.join(a.get('name','?') for a in added)}")
+                if removed:
+                    lines.append(f"- Removed: {', '.join(a.get('name','?') for a in removed)}")
+                if not added and not removed:
+                    lines.append("- No changes since last scan.")
+                return "\n".join(lines)
+            except Exception as e:
+                return f"⚠️ Skills rescan failed: {e}"
+
+        if name == "reload-mcp":
+            return (
+                "`/reload-mcp` can't be run cleanly from the dashboard — it needs the "
+                "gateway's own MCP clients to reconnect. Run `hermes gateway restart` "
+                "or `/reload-mcp` in Discord instead."
+            )
+
+        if name == "topup":
+            return "`/topup` needs the Nous billing portal — open it in a browser (desktop app) or run it in a terminal."
 
         return ""  # not handled — caller falls back to bridge
 
