@@ -30,6 +30,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 import push  # noqa: E402
 
 SAST = timezone(timedelta(hours=2))
+
+# Sentinel: handler already wrote a response; caller must not fall through.
+_RESPONDED = object()
 HERMES = Path(os.path.expanduser("~/.hermes"))
 JOBS = HERMES / "cron" / "jobs.json"
 EXEC = HERMES / "cron" / "executions.db"
@@ -1121,7 +1124,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._json({"error": str(e)}, 502)
 
-    def _exec_dashboard_command(self, name: str, arg: str) -> str:
+    def _exec_dashboard_command(self, name: str, arg: str) -> str | object:
         """Run a read-only dashboard command server-side, backed by real data.
 
         These run in the state server process (same venv/machine as the
@@ -1346,7 +1349,89 @@ class Handler(BaseHTTPRequestHandler):
         if name == "topup":
             return "`/topup` needs the Nous billing portal — open it in a browser (desktop app) or run it in a terminal."
 
+        if name == "restart":
+            # Confirmed by the gate above. Restart the gateway as a background
+            # process so the HTTP response flushes before the gateway dies.
+            self._json({"ok": True, "name": "restart", "output": "🔄 Restarting the Hermes gateway — chat will reconnect in a few seconds."})
+            import threading
+            threading.Timer(1.0, self._restart_gateway).start()
+            return _RESPONDED
+
+        if name == "update":
+            # Confirmed by the gate. Run the ritual script detached — it pulls,
+            # reapplies auth patches, migrates config, restarts the gateway.
+            self._json({"ok": True, "name": "update", "output": "🔄 Updating Hermes — pulling latest, reinstalling deps, restarting the gateway. Back in a minute."})
+            import threading
+            threading.Timer(1.5, self._run_update).start()
+            return _RESPONDED
+
+        if name == "platform":
+            # Read-only status view of the messaging platforms (like Discord's
+            # /platform list — shows live state, nothing destructive).
+            try:
+                hermes_bin = os.path.expanduser("~/.hermes/hermes-agent/venv/bin/hermes")
+                r = subprocess.run(
+                    [hermes_bin, "gateway", "list"],
+                    capture_output=True, text=True, timeout=30,
+                )
+                return (r.stdout or r.stderr or "").strip()
+            except Exception as e:
+                return f"⚠️ Platform status failed: {e}"
+
+        if name == "debug" and arg.split()[0] == "local":
+            # Local debug report — no upload, just the system/log snapshot.
+            try:
+                hermes_bin = os.path.expanduser("~/.hermes/hermes-agent/venv/bin/hermes")
+                r = subprocess.run(
+                    [hermes_bin, "debug", "share", "--local"],
+                    capture_output=True, text=True, timeout=60,
+                )
+                out = (r.stdout or r.stderr or "").strip()
+                return out[:4000] or "/debug: no output"
+            except Exception as e:
+                return f"⚠️ Debug report failed: {e}"
+        if name == "debug":
+            return "Usage: `/debug local` — prints the report locally. (`/debug nous` uploads — not from chat.)"
+
         return ""  # not handled — caller falls back to bridge
+
+    def _restart_gateway(self) -> None:
+        """Restart the systemd gateway service (confirmed earlier)."""
+        try:
+            hermes_bin = os.path.expanduser("~/.hermes/hermes-agent/venv/bin/hermes")
+            r = subprocess.run(
+                [hermes_bin, "gateway", "restart"],
+                capture_output=True, text=True, timeout=120,
+            )
+            log_tail = (r.stdout or r.stderr or "").strip()
+            self._log_ops(f"gateway restart: {log_tail[:200]}")
+        except Exception as e:
+            self._log_ops(f"gateway restart failed: {e}")
+
+    def _run_update(self) -> None:
+        """Run the update ritual script detached (confirmed earlier)."""
+        try:
+            script = os.path.expanduser("~/.hermes/scripts/gateway-update.sh")
+            if not os.path.exists(script):
+                self._log_ops("update failed: script missing")
+                return
+            subprocess.Popen(
+                ["bash", script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            self._log_ops("update script started detached")
+        except Exception as e:
+            self._log_ops(f"update failed to start: {e}")
+
+    def _log_ops(self, msg: str) -> None:
+        """Append a line to the ops log so restarts/updates are auditable."""
+        try:
+            with open(os.path.expanduser("~/.hermes/logs/dashboard-ops.log"), "a") as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+        except Exception:
+            pass
 
     def _exec_slash_command(self) -> None:
         """POST /api/chat/slash — run a slash command via hermes_cli.slash_exec.
@@ -1425,10 +1510,26 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "name": "goal", "output": self._session_goal(session_id, arg)})
             return
 
-        # Destructive / gateway-lifecycle commands are refused from the
-        # dashboard — they need a real terminal (Hermes blocks them from
-        # inside the gateway process tree anyway).
-        blocked = {"restart", "update", "stop", "platform", "yolo", "approvals", "debug"}
+        # Confirmation gate: destructive/lifecycle commands need a second,
+        # explicit confirm (Discord-style) — typing `/restart confirm` (or
+        # `/update confirm`) is the confirmation. A bare command only
+        # explains what will happen.
+        first_arg = arg.split()[0] if arg else ""
+        if name in ("restart", "update") and first_arg != "confirm":
+            what = "restart the Hermes gateway" if name == "restart" else "pull latest Hermes and restart the gateway"
+            self._json({
+                "ok": True,
+                "name": name,
+                "requires_confirm": True,
+                "preview": f"⚠️ This will {what}. Your chat will disconnect and reconnect.",
+                "instructions": f"Type `/{name} confirm` to execute, or anything else to cancel.",
+            })
+            return
+
+        # Destructive / gateway-lifecycle commands — now with confirmation
+        # handled above. Only /yolo and /approvals stay hard-blocked (config
+        # mutation with no chat-visible effect).
+        blocked = {"yolo", "approvals"}
         if name in blocked:
             self._json({
                 "ok": True,
@@ -1438,13 +1539,14 @@ class Handler(BaseHTTPRequestHandler):
 
         # Read-only dashboard commands run server-side, backed by real data
         # (no WS bridge, no orphan-session confusion). Unhandled names return
-        # "" and fall through to the bridge below.
+        # "" and fall through to the bridge below. _RESPONDED means the
+        # handler already wrote a response (async lifecycle ops).
         local_out = self._exec_dashboard_command(name, arg)
+        if local_out is _RESPONDED:
+            return
         if local_out:
             self._json({"ok": True, "name": name, "output": local_out, "via": "server"})
             return
-        if local_out == "":  # explicitly handled but empty? treat as handled-no-op
-            pass
 
         try:
             import ws_bridge

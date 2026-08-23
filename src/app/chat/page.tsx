@@ -1389,7 +1389,11 @@ export default function ChatPage() {
         case "reload-skills":
         case "reload-mcp":
         case "topup":
-        case "insights": {
+        case "insights":
+        case "restart":
+        case "update":
+        case "platform":
+        case "debug": {
           // Full command bridge — the state server runs read-only commands
           // locally (backed by real data) and routes the rest through the
           // native dashboard's WS RPC.
