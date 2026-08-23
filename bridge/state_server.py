@@ -1120,6 +1120,152 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._json({"error": str(e)}, 502)
 
+    def _exec_dashboard_command(self, name: str, arg: str) -> str:
+        """Run a read-only dashboard command server-side, backed by real data.
+
+        These run in the state server process (same venv/machine as the
+        gateway) — no WS bridge, no orphan session, no error bubbles. Covers
+        the commands the picker surfaces that have no registry executor.
+        """
+        import json as _json
+        import sqlite3 as _sqlite3
+
+        home = os.path.expanduser("~/.hermes")
+
+        if name == "cron" and (not arg or arg.split()[0] in ("list", "ls")):
+            try:
+                data = _json.load(open(f"{home}/cron/jobs.json"))
+                jobs = data.get("jobs", [])
+                if not jobs:
+                    return "No cron jobs scheduled."
+                lines = [f"**Cron jobs ({len(jobs)})**", ""]
+                for j in sorted(jobs, key=lambda x: x.get("name", "")):
+                    sched = (j.get("schedule") or {}).get("display") or j.get("schedule_display") or "?"
+                    lines.append(
+                        f"- `{j.get('name')}` — `{sched}` — "
+                        f"{'script: ' + (j.get('script') or '') if j.get('script') else (j.get('model') or 'agent')}"
+                    )
+                return "\n".join(lines)
+            except Exception as e:
+                return f"⚠️ Cron read failed: {e}"
+
+        if name == "skills" and (not arg or arg.split()[0] in ("list", "ls", "browse")):
+            try:
+                skills_dir = f"{home}/skills"
+                if not os.path.isdir(skills_dir):
+                    return "No skills directory."
+                cats = sorted(d for d in os.listdir(skills_dir) if os.path.isdir(os.path.join(skills_dir, d)))
+                lines = [f"**Skills ({len(cats)} categories)**", ""]
+                for c in cats:
+                    sub = os.path.join(skills_dir, c)
+                    items = [d for d in os.listdir(sub) if os.path.isdir(os.path.join(sub, d))]
+                    lines.append(f"- **{c}** — {', '.join(items) if items else '(loose files)'}")
+                return "\n".join(lines)
+            except Exception as e:
+                return f"⚠️ Skills read failed: {e}"
+
+        if name == "usage":
+            try:
+                path = f"{home}/cron/usage_audit.jsonl"
+                if not os.path.exists(path):
+                    return "No usage audit data yet."
+                total = prompts = 0
+                for line in open(path):
+                    try:
+                        e = _json.loads(line)
+                        total += e.get("total_tokens", 0) or 0
+                        prompts += 1
+                    except Exception:
+                        pass
+                return f"**Token usage**\n\n- Runs audited: {prompts}\n- Total tokens: {total:,}"
+            except Exception as e:
+                return f"⚠️ Usage read failed: {e}"
+
+        if name == "insights":
+            try:
+                db = f"{home}/state.db"
+                con = _sqlite3.connect(db)
+                row = con.execute(
+                    "select count(*), coalesce(sum(message_count),0), coalesce(sum(tool_call_count),0), "
+                    "coalesce(sum(input_tokens),0)+coalesce(sum(output_tokens),0) from sessions"
+                ).fetchone()
+                con.close()
+                return (
+                    f"**Insights (all sessions)**\n\n"
+                    f"- Sessions: {row[0]:,}\n- Messages: {row[1]:,}\n"
+                    f"- Tool calls: {row[2]:,}\n- Tokens (in+out): {row[3]:,}"
+                )
+            except Exception as e:
+                return f"⚠️ Insights read failed: {e}"
+
+        if name == "agents" or name == "tasks":
+            try:
+                db = f"{home}/state.db"
+                con = _sqlite3.connect(db)
+                rows = con.execute(
+                    "select id, source, started_at, message_count from sessions "
+                    "where ended_at is null order by started_at desc limit 10"
+                ).fetchall()
+                con.close()
+                if not rows:
+                    return "No active sessions right now."
+                lines = ["**Active sessions**", ""]
+                for sid, source, started, count in rows:
+                    lines.append(
+                        f"- `{sid[:20]}…` ({source}) — {count} msgs — {time.strftime('%b %d %H:%M', time.localtime(started))}"
+                    )
+                return "\n".join(lines)
+            except Exception as e:
+                return f"⚠️ Agents read failed: {e}"
+
+        if name == "status":
+            db = f"{home}/state.db"
+            try:
+                con = _sqlite3.connect(db)
+                row = con.execute(
+                    "select id, model, source, message_count, tool_call_count from sessions "
+                    "order by started_at desc limit 1"
+                ).fetchone()
+                con.close()
+                if not row:
+                    return "No sessions yet."
+                return (
+                    f"**Latest session**\n\n"
+                    f"- Id: `{row[0]}`\n- Model: {row[1] or 'default'}\n- Source: {row[2]}\n"
+                    f"- Messages: {row[3]} · Tools: {row[4]}"
+                )
+            except Exception as e:
+                return f"⚠️ Status read failed: {e}"
+
+        if name == "memory" and arg.split()[0] in ("pending",):
+            try:
+                pending_dir = f"{home}/pending_messages"
+                if not os.path.isdir(pending_dir):
+                    return "No pending memory writes."
+                files = os.listdir(pending_dir)
+                if not files:
+                    return "No pending memory writes."
+                lines = [f"**Pending memory writes ({len(files)})**", ""]
+                for f in files[:20]:
+                    lines.append(f"- `{f}`")
+                return "\n".join(lines)
+            except Exception as e:
+                return f"⚠️ Memory read failed: {e}"
+
+        if name == "curator" and arg.split()[0] in ("status",):
+            try:
+                state = _json.load(open(f"{home}/skills/.curator_state"))
+                return (
+                    f"**Curator status**\n\n"
+                    f"- Last run: {state.get('last_run_at', 'never')}\n"
+                    f"- Duration: {state.get('last_run_duration_seconds', 0):.1f}s\n"
+                    f"- Summary: {state.get('last_run_summary', '—')}"
+                )
+            except Exception as e:
+                return f"⚠️ Curator read failed: {e}"
+
+        return ""  # not handled — caller falls back to bridge
+
     def _exec_slash_command(self) -> None:
         """POST /api/chat/slash — run a slash command via hermes_cli.slash_exec.
 
@@ -1207,6 +1353,16 @@ class Handler(BaseHTTPRequestHandler):
                 "output": f"/{name} is blocked from the dashboard chat for safety — run it in a terminal or Discord.",
             })
             return
+
+        # Read-only dashboard commands run server-side, backed by real data
+        # (no WS bridge, no orphan-session confusion). Unhandled names return
+        # "" and fall through to the bridge below.
+        local_out = self._exec_dashboard_command(name, arg)
+        if local_out:
+            self._json({"ok": True, "name": name, "output": local_out, "via": "server"})
+            return
+        if local_out == "":  # explicitly handled but empty? treat as handled-no-op
+            pass
 
         try:
             import ws_bridge

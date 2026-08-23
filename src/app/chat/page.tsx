@@ -1390,7 +1390,9 @@ export default function ChatPage() {
         case "reload-mcp":
         case "topup":
         case "insights": {
-          // Full command bridge — runs through the native dashboard's WS RPC.
+          // Full command bridge — the state server runs read-only commands
+          // locally (backed by real data) and routes the rest through the
+          // native dashboard's WS RPC.
           try {
             const res = await fetch("/api/chat/command", {
               method: "POST",
