@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Clock, ChevronDown, ChevronUp, Brain, CheckCircle2, XCircle, Loader2, Search, Send } from "lucide-react";
+import { Clock, ChevronDown, ChevronUp, Brain, CheckCircle2, XCircle, FileText, Loader2, Search, Send } from "lucide-react";
 import { fmtSAST, fmtSASTSec } from "@/lib/time";
 import { humanizeCron, humanizeDeliver } from "@/lib/cron";
 
@@ -35,6 +35,21 @@ type Thinking = {
   messages: { role: string; content: string }[];
 };
 
+function outputFileTimestamp(filename: string): number | null {
+  const match = filename.match(/^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})\.md$/);
+  if (!match) return null;
+  const timestamp = Date.parse(`${match[1]}T${match[2]}:${match[3]}:${match[4]}+02:00`);
+  return Number.isNaN(timestamp) ? null : Math.floor(timestamp / 1000);
+}
+
+function isSilentOutput(content: string): boolean {
+  const value = content.trim();
+  return (
+    value === "" ||
+    /^(?:status:\s*)?(?:silent(?:\s*\(empty output\))?|no output(?:\s*\(silent run\))?|empty output)\s*[.!]?$/i.test(value)
+  );
+}
+
 export default function CronsPage() {
   const [crons, setCrons] = useState<CronJob[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -45,6 +60,9 @@ export default function CronsPage() {
   const [thinking, setThinking] = useState<Thinking | null>(null);
   const [thinkingFor, setThinkingFor] = useState<string | null>(null);
   const [thinkingLoading, setThinkingLoading] = useState(false);
+  const [output, setOutput] = useState<string | null>(null);
+  const [outputFor, setOutputFor] = useState<string | null>(null);
+  const [outputLoading, setOutputLoading] = useState(false);
 
   useEffect(() => {
     Promise.all([fetch("/api/crons").then((r) => r.json()), fetch("/api/runs").then((r) => r.json())])
@@ -89,11 +107,40 @@ export default function CronsPage() {
         setThinking(null);
         setThinkingFor(null);
       }
-    } catch (e) {
+    } catch {
       setThinking(null);
       setThinkingFor(null);
     } finally {
       setThinkingLoading(false);
+    }
+  };
+
+  const loadOutput = async (jobId: string, run: Run) => {
+    setOutputLoading(true);
+    setOutputFor(jobId);
+    setOutput(null);
+    try {
+      const listRes = await fetch(`/api/cron-output?job=${encodeURIComponent(jobId)}`);
+      const listData = await listRes.json();
+      if (!listRes.ok) throw new Error(listData.error || "could not list cron output");
+
+      const files: string[] = Array.isArray(listData.files)
+        ? listData.files.filter((file: unknown): file is string => typeof file === "string")
+        : [];
+      const runTimestamp = Math.floor(Date.parse(run.claimed_at) / 1000);
+      const filename =
+        files.find((file) => outputFileTimestamp(file) === runTimestamp) ?? files[0];
+      if (!filename) throw new Error("no cron output files found");
+
+      const params = new URLSearchParams({ job: jobId, file: filename });
+      const outputRes = await fetch(`/api/cron-output?${params.toString()}`);
+      const outputData = await outputRes.json();
+      if (!outputRes.ok) throw new Error(outputData.error || "could not load cron output");
+      setOutput(typeof outputData.content === "string" ? outputData.content : "");
+    } catch (e) {
+      setOutput(`Output unavailable: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setOutputLoading(false);
     }
   };
 
@@ -217,15 +264,24 @@ export default function CronsPage() {
                           <span style={{ color: "var(--text-dim)" }}>{fmtSASTSec(run.claimed_at)}</span>
                           <span className="font-medium">{run.status}</span>
                           {run.error && <span className="truncate font-mono" style={{ color: "var(--red)" }} title={run.error}>{run.error.slice(0, 80)}</span>}
-                          {!cron.no_agent && (
+                          <div className="ml-auto flex items-center gap-1.5">
+                            {!cron.no_agent && (
+                              <button
+                                onClick={() => loadThinking(cronId, run)}
+                                className="flex items-center gap-1 rounded-md px-2 py-1 font-semibold"
+                                style={{ color: "var(--accent)", background: "rgba(124,108,255,0.10)" }}
+                              >
+                                <Brain className="h-3 w-3" /> Thinking
+                              </button>
+                            )}
                             <button
-                              onClick={() => loadThinking(cronId, run)}
-                              className="ml-auto flex items-center gap-1 rounded-md px-2 py-1 font-semibold"
-                              style={{ color: "var(--accent)", background: "rgba(124,108,255,0.10)" }}
+                              onClick={() => loadOutput(cronId, run)}
+                              className="flex items-center gap-1 rounded-md px-2 py-1 font-semibold"
+                              style={{ color: "var(--accent-2)", background: "rgba(77,159,255,0.10)" }}
                             >
-                              <Brain className="h-3 w-3" /> Thinking
+                              <FileText className="h-3 w-3" /> Output
                             </button>
-                          )}
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -254,6 +310,40 @@ export default function CronsPage() {
                   {thinkingLoading && thinkingFor === cronId && (
                     <div className="mt-4 flex items-center gap-2 text-xs" style={{ color: "var(--text-faint)" }}>
                       <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading thinking…
+                    </div>
+                  )}
+
+                  {/* Cron output viewer */}
+                  {output !== null && outputFor === cronId && (
+                    <div className="mt-4 rounded-lg border p-4" style={{ borderColor: "var(--card-border)" }}>
+                      <div className="mb-2 flex items-center justify-between">
+                        <h4 className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--accent-2)" }}>
+                          <FileText className="h-3.5 w-3.5" /> Cron output
+                        </h4>
+                        <button
+                          onClick={() => {
+                            setOutput(null);
+                            setOutputFor(null);
+                          }}
+                          className="text-xs"
+                          style={{ color: "var(--text-faint)" }}
+                        >
+                          close
+                        </button>
+                      </div>
+                      {isSilentOutput(output) ? (
+                        <div className="text-xs" style={{ color: "var(--text-faint)" }}>No output (silent run)</div>
+                      ) : (
+                        <pre className="max-h-80 overflow-y-auto whitespace-pre-wrap break-words font-mono text-xs" style={{ color: "var(--text-dim)" }}>
+                          {output}
+                        </pre>
+                      )}
+                    </div>
+                  )}
+
+                  {outputLoading && outputFor === cronId && (
+                    <div className="mt-4 flex items-center gap-2 text-xs" style={{ color: "var(--text-faint)" }}>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading output…
                     </div>
                   )}
 

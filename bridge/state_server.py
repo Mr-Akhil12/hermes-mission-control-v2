@@ -6,6 +6,7 @@ show live data on the phone (via the ngrok tunnel) without needing Turso.
 
 Endpoints (all read-only, local files only):
   GET /api/crons     -> jobs.json
+  GET /api/cron-output -> cron output files
   GET /api/runs      -> executions.db (last 25h)
   GET /api/sessions  -> state.db sessions + last message
   GET /api/artifacts -> hermes-dump + hyperframes repos listing
@@ -36,6 +37,7 @@ _RESPONDED = object()
 HERMES = Path(os.path.expanduser("~/.hermes"))
 JOBS = HERMES / "cron" / "jobs.json"
 EXEC = HERMES / "cron" / "executions.db"
+CRON_OUTPUT = HERMES / "cron" / "output"
 STATE = HERMES / "state.db"
 APPROVALS = HERMES / "approvals.json"
 GATEWAY_STATE = HERMES / "gateway_state.json"
@@ -107,6 +109,45 @@ def load_runs() -> list[dict]:
         {"job_id": r[0], "status": r[1], "claimed_at": r[2], "started_at": r[3], "finished_at": r[4], "error": r[5]}
         for r in rows
     ]
+
+
+def load_cron_output(job_id: str, filename: str | None = None) -> dict:
+    """List or read cron output files without allowing path traversal."""
+    parts = [job_id] + ([filename] if filename is not None else [])
+    if any(not part or ".." in part or "/" in part or "\\" in part for part in parts):
+        raise ValueError("invalid job or file")
+
+    output_root = CRON_OUTPUT.resolve()
+    job_dir = (output_root / job_id).resolve()
+    try:
+        job_dir.relative_to(output_root)
+    except ValueError as exc:
+        raise ValueError("invalid job or file") from exc
+
+    if not job_dir.is_dir():
+        raise FileNotFoundError
+
+    if filename is None:
+        files = sorted(
+            (
+                path.name
+                for path in job_dir.iterdir()
+                if path.is_file() and path.suffix == ".md" and path.resolve().parent == job_dir
+            ),
+            reverse=True,
+        )[:20]
+        return {"files": files}
+
+    if not filename.endswith(".md"):
+        raise FileNotFoundError
+    output_file = job_dir / filename
+    if not output_file.is_file() or output_file.resolve().parent != job_dir:
+        raise FileNotFoundError
+    return {
+        "content": output_file.read_text(encoding="utf-8", errors="replace"),
+        "job": job_id,
+        "file": filename,
+    }
 
 
 def load_profiles() -> list[dict]:
@@ -704,6 +745,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/crons":
                 self._json({"jobs": load_crons(), "source": "local"})
+            elif path == "/api/cron-output":
+                from urllib.parse import parse_qs, urlsplit
+
+                params = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                job_id = (params.get("job") or [""])[0]
+                filename = (params.get("file") or [None])[0]
+                try:
+                    self._json(load_cron_output(job_id, filename))
+                except ValueError:
+                    self._json({"error": "invalid job or file"}, 400)
+                except FileNotFoundError:
+                    self._json({"error": "not found"}, 404)
             elif path == "/api/runs":
                 self._json({"runs": load_runs(), "source": "local"})
             elif path == "/api/profiles":
