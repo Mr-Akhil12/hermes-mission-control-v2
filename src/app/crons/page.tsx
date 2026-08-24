@@ -14,6 +14,7 @@ type CronJob = {
   next_run_at: string | null;
   last_run_at: string | null;
   state: string;
+  enabled?: boolean;
   no_agent: boolean;
   script: string | null;
   deliver?: string | null;
@@ -57,6 +58,7 @@ export default function CronsPage() {
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  const [showPaused, setShowPaused] = useState(false);
   const [thinking, setThinking] = useState<Thinking | null>(null);
   const [thinkingFor, setThinkingFor] = useState<string | null>(null);
   const [thinkingLoading, setThinkingLoading] = useState(false);
@@ -75,10 +77,14 @@ export default function CronsPage() {
   }, []);
 
   // Filter by cron name / id / script — case-insensitive substring.
+  // The Active/Paused toggle decides which set is shown; the text filter
+  // narrows within it.
+  const isActiveJob = (c: CronJob) => c.enabled !== false && c.state !== "paused";
   const filteredCrons = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    if (!q) return crons;
     return crons.filter((c) => {
+      if (showPaused ? isActiveJob(c) : !isActiveJob(c)) return false;
+      if (!q) return true;
       const cronId = c.job_id ?? c.id ?? "";
       return (
         c.name.toLowerCase().includes(q) ||
@@ -86,7 +92,7 @@ export default function CronsPage() {
         (c.script ?? "").toLowerCase().includes(q)
       );
     });
-  }, [crons, filter]);
+  }, [crons, filter, showPaused]);
 
   // History accordion: only the last 3 runs per job.
   const runsFor = (jobId: string) => runs.filter((r) => r.job_id === jobId).slice(0, 3);
@@ -167,33 +173,51 @@ export default function CronsPage() {
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <div className="card p-4">
-          <div className="text-2xl font-bold" style={{ color: "var(--accent)" }}>{crons.length}</div>
-          <div className="text-xs" style={{ color: "var(--text-faint)" }}>Total</div>
+          <div className="text-2xl font-bold" style={{ color: "var(--accent)" }}>{crons.filter((c) => isActiveJob(c)).length}</div>
+          <div className="text-xs" style={{ color: "var(--text-faint)" }}>Active</div>
         </div>
         <div className="card p-4">
-          <div className="text-2xl font-bold" style={{ color: "var(--green)" }}>{crons.filter((c) => c.last_status === "ok").length}</div>
+          <div className="text-2xl font-bold" style={{ color: "var(--green)" }}>{crons.filter((c) => isActiveJob(c) && c.last_status === "ok").length}</div>
           <div className="text-xs" style={{ color: "var(--text-faint)" }}>Healthy</div>
         </div>
         <div className="card p-4">
-          <div className="text-2xl font-bold" style={{ color: "var(--red)" }}>{crons.filter((c) => c.last_status === "error").length}</div>
+          <div className="text-2xl font-bold" style={{ color: "var(--red)" }}>{crons.filter((c) => isActiveJob(c) && c.last_status === "error").length}</div>
           <div className="text-xs" style={{ color: "var(--text-faint)" }}>Failed</div>
         </div>
         <div className="card p-4">
-          <div className="text-2xl font-bold" style={{ color: "var(--amber)" }}>{runs.length}</div>
-          <div className="text-xs" style={{ color: "var(--text-faint)" }}>Runs (24h)</div>
+          <div className="text-2xl font-bold" style={{ color: "var(--text-faint)" }}>{crons.filter((c) => !isActiveJob(c)).length}</div>
+          <div className="text-xs" style={{ color: "var(--text-faint)" }}>Paused</div>
         </div>
       </div>
 
-      {/* Filter box */}
-      <div className="relative">
-        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2" style={{ color: "var(--text-faint)" }} />
-        <input
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter crons by name, id, or script…"
-          className="w-full rounded-lg border bg-transparent py-2.5 pl-9 pr-3 text-sm outline-none"
-          style={{ borderColor: "var(--card-border)", color: "var(--text)" }}
-        />
+      {/* Active / Paused toggle + filter box */}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex rounded-lg border p-1" style={{ borderColor: "var(--card-border)" }}>
+          <button
+            onClick={() => setShowPaused(false)}
+            className="rounded-md px-3 py-1.5 text-xs font-semibold transition-colors"
+            style={!showPaused ? { background: "rgba(124,108,255,0.15)", color: "var(--accent)" } : { color: "var(--text-faint)" }}
+          >
+            Active ({crons.filter((c) => isActiveJob(c)).length})
+          </button>
+          <button
+            onClick={() => setShowPaused(true)}
+            className="rounded-md px-3 py-1.5 text-xs font-semibold transition-colors"
+            style={showPaused ? { background: "rgba(77,159,255,0.15)", color: "var(--accent-2)" } : { color: "var(--text-faint)" }}
+          >
+            Paused ({crons.filter((c) => !isActiveJob(c)).length})
+          </button>
+        </div>
+        <div className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2" style={{ color: "var(--text-faint)" }} />
+          <input
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder={showPaused ? "Filter paused crons…" : "Filter active crons…"}
+            className="w-full rounded-lg border bg-transparent py-2.5 pl-9 pr-3 text-sm outline-none"
+            style={{ borderColor: "var(--card-border)", color: "var(--text)" }}
+          />
+        </div>
       </div>
 
       <div className="space-y-3">
@@ -218,6 +242,11 @@ export default function CronsPage() {
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-semibold">{cron.name}</span>
+                    {!isActiveJob(cron) && (
+                      <span className="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase" style={{ background: "rgba(255,255,255,0.06)", color: "var(--text-faint)" }}>
+                        paused
+                      </span>
+                    )}
                     {cron.no_agent && (
                       <span className="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase" style={{ background: "rgba(77,159,255,0.12)", color: "var(--accent-2)" }}>
                         script

@@ -14,6 +14,7 @@ type CronJob = {
   next_run_at: string | null;
   last_run_at: string | null;
   state: string;
+  enabled?: boolean;
 };
 
 type Brief = {
@@ -50,9 +51,12 @@ export default function Home() {
   // REAL failure signal: last_status === "error" from jobs.json (verified:
   // executions.db uses completed/running — not failed — so run-status counts
   // always read 0 failures. last_status is the true source.)
-  const failed = crons.filter((c) => c.last_status === "error");
-  const healthy = crons.filter((c) => c.last_status === "ok");
-  const quiet = crons.filter((c) => c.last_status !== "error" && c.last_status !== "ok");
+  // Only ACTIVE jobs count — paused jobs (40 of 50) are parked, not health.
+  const active = crons.filter((c) => c.enabled !== false && c.state !== "paused");
+  const failed = active.filter((c) => c.last_status === "error");
+  const healthy = active.filter((c) => c.last_status === "ok");
+  const quiet = active.filter((c) => c.last_status !== "error" && c.last_status !== "ok");
+  const pausedCount = crons.length - active.length;
 
   const now = new Date();
   const dateStr = now.toLocaleDateString("en-ZA", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
@@ -145,8 +149,8 @@ export default function Home() {
         </h2>
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
           <div className="card p-4">
-            <div className="text-2xl font-bold" style={{ color: "var(--accent)" }}>{crons.length}</div>
-            <div className="text-xs" style={{ color: "var(--text-faint)" }}>Total crons</div>
+            <div className="text-2xl font-bold" style={{ color: "var(--accent)" }}>{active.length}</div>
+            <div className="text-xs" style={{ color: "var(--text-faint)" }}>Active crons</div>
           </div>
           <div className="card p-4">
             <div className="text-2xl font-bold" style={{ color: "var(--green)" }}>{healthy.length}</div>
@@ -157,8 +161,8 @@ export default function Home() {
             <div className="text-xs" style={{ color: "var(--text-faint)" }}>Failed</div>
           </div>
           <div className="card p-4">
-            <div className="text-2xl font-bold" style={{ color: "var(--amber)" }}>{quiet.length}</div>
-            <div className="text-xs" style={{ color: "var(--text-faint)" }}>Quiet/other</div>
+            <div className="text-2xl font-bold" style={{ color: "var(--text-faint)" }}>{pausedCount}</div>
+            <div className="text-xs" style={{ color: "var(--text-faint)" }}>Paused</div>
           </div>
         </div>
       </section>
