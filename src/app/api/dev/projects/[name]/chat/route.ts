@@ -10,6 +10,7 @@ type SessionRecord = {
 
 type SessionList = {
   data?: SessionRecord[];
+  sessions?: SessionRecord[];
 };
 
 class UpstreamError extends Error {
@@ -53,7 +54,10 @@ async function findProjectSession(
   }
 
   const expectedTitle = projectSessionTitle(name);
-  return (payload.data ?? []).find((session) => session.title === expectedTitle) ?? null;
+  // The state server's local /api/sessions returns { sessions: [...] } while
+  // the Hermes API returns { data: [...] } — accept both shapes.
+  const list = payload.sessions ?? payload.data ?? [];
+  return list.find((session) => session.title === expectedTitle) ?? null;
 }
 
 function errorResponse(error: unknown) {

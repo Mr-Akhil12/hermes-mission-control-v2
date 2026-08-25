@@ -49,13 +49,17 @@ async function assertProjectSession(
   const response = await bridgeFetch(path, { cache: "no-store" });
   const payload = (await response.json().catch(() => ({}))) as {
     data?: SessionRecord[];
+    sessions?: SessionRecord[];
   };
 
   if (!response.ok) {
     throw new Error(`Session lookup failed (${response.status})`);
   }
 
-  const matching = (payload.data ?? []).find(
+  // The state server's local /api/sessions returns { sessions: [...] } while
+  // the Hermes API returns { data: [...] } — accept both shapes.
+  const list = payload.sessions ?? payload.data ?? [];
+  const matching = list.find(
     (session) => session.title === projectTitle(name)
   );
   if (!matching || matching.id !== sessionId) {
