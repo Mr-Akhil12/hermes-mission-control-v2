@@ -1967,8 +1967,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"state server on :{PORT} (SAST {datetime.now(SAST).isoformat()})", flush=True)
+    # Bind 0.0.0.0 so the Tailscale funnel (running on the Windows host) can
+    # reach us via the WSL IP. Requests are bearer-token-gated; this is the
+    # same exposure class as the dashboard on 0.0.0.0:9119.
+    bind_host = os.environ.get("STATE_HOST", "0.0.0.0")
+    server = ThreadingHTTPServer((bind_host, PORT), Handler)
+    print(f"state server on {bind_host}:{PORT} (SAST {datetime.now(SAST).isoformat()})", flush=True)
     server.serve_forever()
 
 
