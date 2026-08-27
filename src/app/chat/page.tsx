@@ -16,8 +16,10 @@ import { PhaseBanner, type RunPhase } from "@/components/chat/RunStatus";
 import { MessageSkeleton, SessionListSkeleton } from "@/components/chat/Skeleton";
 import { BrowserView } from "@/components/chat/BrowserView";
 import { ChainView } from "@/components/chat/ChainView";
+import { ToolCallStack } from "@/components/chat/ToolCalls";
 import { DEFAULT_MODEL as MODEL } from "@/lib/models";
 import { dbg, toolSnap, liveSnap } from "@/lib/chat-debug";
+import { watchRunCompletion } from "@/lib/push";
 
 type LiveState = {
   phase: RunPhase;
@@ -409,7 +411,8 @@ export default function ChatPage() {
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
   const [titleDraft, setTitleDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
-  const reasoningRef = useRef<HTMLDivElement>(null);
+  const messagesViewportRef = useRef<HTMLDivElement>(null);
+  const followLatestRef = useRef(true);
   const recognitionRef = useRef<any>(null);
   const streamAbort = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
@@ -986,22 +989,33 @@ export default function ChatPage() {
     return () => clearInterval(t);
   }, [busy, live.stats?.startedAt]);
 
-  const scrollToBottom = useCallback(() => {
-    bottomRef.current?.scrollIntoView({ behavior: settings.autoScroll ? "smooth" : "auto" });
-  }, [settings.autoScroll]);
+  const updateFollowLatest = useCallback(() => {
+    const viewport = messagesViewportRef.current;
+    if (!viewport) return;
+    followLatestRef.current =
+      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 96;
+  }, []);
+
+  const pinToLatest = useCallback(() => {
+    followLatestRef.current = true;
+    requestAnimationFrame(() => {
+      const viewport = messagesViewportRef.current;
+      if (viewport) viewport.scrollTop = viewport.scrollHeight;
+    });
+  }, []);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages, busy, live, streamedText, scrollToBottom]);
+    if (!settings.autoScroll || !followLatestRef.current) return;
+    const frame = requestAnimationFrame(() => {
+      const viewport = messagesViewportRef.current;
+      if (viewport) viewport.scrollTop = viewport.scrollHeight;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [messages, busy, live, streamedText, settings.autoScroll]);
 
   // Keep the reasoning stream pinned to the bottom as it grows — the box is
   // height-capped and scrolls internally, so it must follow the newest text
   // instead of staying at the top.
-  useEffect(() => {
-    const el = reasoningRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [live.reasoning]);
-
   const newConversation = useCallback(async () => {
     // Lazy creation: don't POST a session yet — an empty conversation with
     // zero messages should never be saved. The session is created on the
@@ -1555,6 +1569,7 @@ export default function ChatPage() {
         failedCount: 0,
       };
       if (activeIdRef.current === sessionId) {
+        pinToLatest();
         setMessages((current) => [...current, { role: "user", content: trimmed }]);
         setBusy(true);
         setLive(initialLive);
@@ -1616,6 +1631,7 @@ export default function ChatPage() {
       let sawRunEvent = false;
       let terminalFailure = false;
       let runFinished = false;
+      let completionWatchRegistered = false;
       let readerLastSeq = sessionId ? lastSeqState[sessionId] ?? 0 : 0;
       const baselineMessageCount = messagesRef.current.length;
       const baselineLastAssistant = [...messagesRef.current]
@@ -1708,7 +1724,18 @@ export default function ChatPage() {
 
             switch (payload.event) {
               case "run.started": {
-                runRuntime = (payload as any).runtime ?? null;
+                const startedPayload = payload as Extract<StreamEvent, { event: "run.started" }>;
+                runRuntime = startedPayload.runtime ?? null;
+                const runId = String(startedPayload.run_id ?? "");
+                if (runId && sessionId && !completionWatchRegistered) {
+                  completionWatchRegistered = true;
+                  watchRunCompletion({
+                    runId,
+                    sessionId,
+                    url: "/chat",
+                    title: "Hermes replied",
+                  });
+                }
                 bumpLive({ phase: "initializing", stats: { ...(currentLive.stats ?? { toolCount: 0, failedTools: 0, startedAt }), runtime: runRuntime } });
                 // brief "initializing" beat then move to thinking as events flow
                 dbg("sse", `run.started runtime=${runRuntime ?? "?"}`, { sessionId });
@@ -2180,7 +2207,7 @@ export default function ChatPage() {
         }
       }
     },
-    [activeId, voiceOn, loadSessions, loadMessages, handleSlash, profile, attachments, effectiveModel]
+    [activeId, voiceOn, loadSessions, loadMessages, handleSlash, profile, attachments, effectiveModel, pinToLatest]
   );
 
   sendRef.current = send;
@@ -2956,67 +2983,26 @@ export default function ChatPage() {
     // The chain persists across phase flips, so nothing disappears when the
     // run moves from thinking to tools to streaming.
     const chainSegments = live.chain.length > 0 ? live.chain : live.reasoning ? [{ kind: "reasoning" as const, text: live.reasoning }] : [];
-
-    // Inline view caps at the most recent 3 TOOL segments (keeping the
-    // reasoning that leads into them); the fullscreen chain shows everything
-    // in order. Cap by finding the index of the 3rd-last tool segment.
-    let inlineSegments = chainSegments;
-    if (chainSegments.length > 4) {
-      const toolIdx = chainSegments
-        .map((s, i) => (s.kind === "tool" ? i : -1))
-        .filter((i) => i >= 0);
-      if (toolIdx.length > 3) {
-        inlineSegments = chainSegments.slice(toolIdx[toolIdx.length - 3]);
-      }
-    }
+    const reasoningSegments = chainSegments.filter((segment) => segment.kind === "reasoning");
 
     return (
       <div className="flex justify-start">
         <div className="max-w-[88%] min-w-0 rounded-2xl border px-4 py-2.5 text-sm" style={{ borderColor: "var(--card-border)", background: "color-mix(in srgb, var(--bg) 60%, transparent)", color: "var(--text)" }}>
           {usingBrowser && <BrowserView />}
-          {inlineSegments.length > 0 && (
+          {reasoningSegments.length > 0 && settings.reasoning !== "hidden" && (
             <div className="mb-2 space-y-2">
-              {inlineSegments.map((seg, i) =>
-                seg.kind === "reasoning" ? (
-                  settings.reasoning !== "hidden" ? (
+              {reasoningSegments.map((seg, i) => (
                   <div
                     key={`r-${i}`}
                     className="whitespace-pre-wrap rounded-lg border-l-2 px-2.5 py-1.5 text-xs leading-relaxed"
-                    style={{ borderLeftColor: "var(--accent)", background: "rgba(124,108,255,0.06)", color: "var(--text-dim)", maxHeight: 240, overflowY: "auto" }}
+                    style={{ borderLeftColor: "var(--accent)", background: "rgba(124,108,255,0.06)", color: "var(--text-dim)" }}
                   >
                     {settings.reasoning === "partial" && seg.text.length > 900 ? seg.text.slice(-900) : seg.text}
                     {settings.reasoning === "partial" && seg.text.length > 900 && (
                       <div className="mt-1 text-[10px] italic opacity-60">(preview mode — showing tail)</div>
                     )}
                   </div>
-                  ) : null
-                ) : (
-                  <div key={`t-${i}`} className="flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs" style={{ borderColor: "var(--card-border)", color: "var(--text-dim)" }}>
-                    {seg.tool.durationMs !== undefined ? (
-                      seg.tool.error ? <span style={{ color: "var(--red)" }}>✕</span> : <span style={{ color: "var(--green)" }}>✓</span>
-                    ) : (
-                      <Loader2 className="h-3 w-3 animate-spin" style={{ color: "var(--accent)" }} />
-                    )}
-                    <span className="truncate">{seg.tool.name.replace(/_/g, " ")}</span>
-                    <span className="ml-auto shrink-0 font-mono text-[10px] opacity-70">
-                      {seg.tool.durationMs !== undefined
-                        ? (seg.tool.durationMs / 1000).toFixed(1)
-                        : Math.max(0, (Date.now() - (seg.tool.startedAt ?? Date.now())) / 1000).toFixed(1)}
-                      s
-                    </span>
-                  </div>
-                )
-              )}
-              {chainSegments.length > 0 && (
-                <button
-                  onClick={() => setChainOpen(true)}
-                  className="flex w-full items-center justify-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[10px] font-semibold"
-                  style={{ borderColor: "var(--card-border)", color: "var(--text-faint)" }}
-                >
-                  <Maximize2 className="h-3 w-3" />
-                  View full chain ({live.tools.length} tool call{live.tools.length === 1 ? "" : "s"})
-                </button>
-              )}
+              ))}
             </div>
           )}
           {live.phase === "streaming" && streamedText && (
@@ -3032,6 +3018,19 @@ export default function ChatPage() {
                 <span className="thinking-dot h-1.5 w-1.5 rounded-full bg-current" />
               </span>
               {live.phase === "initializing" ? "Initializing agent…" : live.phase === "thinking" ? "Thinking…" : "Working…"}
+            </div>
+          )}
+          {live.tools.length > 0 && (
+            <div className="mt-2 space-y-1.5">
+              <ToolCallStack tools={live.tools} mode={settings.tools} />
+              <button
+                onClick={() => setChainOpen(true)}
+                className="flex w-full items-center justify-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[10px] font-semibold"
+                style={{ borderColor: "var(--card-border)", color: "var(--text-faint)" }}
+              >
+                <Maximize2 className="h-3 w-3" />
+                View full chain ({live.tools.length} tool call{live.tools.length === 1 ? "" : "s"})
+              </button>
             </div>
           )}
         </div>
@@ -3498,7 +3497,11 @@ export default function ChatPage() {
                 </span>
               )}
             </div>
-            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+            <div
+              ref={messagesViewportRef}
+              onScroll={updateFollowLatest}
+              className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4"
+            >
               <MessageHistory
                 messages={messages}
                 messagesLoading={messagesLoading}

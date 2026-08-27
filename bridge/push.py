@@ -117,7 +117,13 @@ def unsubscribe(endpoint: str) -> int:
     return len(subs)
 
 
-def send_notification(title: str, body: str, url: str = "/approvals", tag: str = "hermes") -> dict:
+def send_notification(
+    title: str,
+    body: str,
+    url: str = "/approvals",
+    tag: str = "hermes",
+    only_when_away: bool = False,
+) -> dict:
     """Send a push to every stored subscription. Returns {sent, failed}."""
     if not _AVAILABLE:
         return {"sent": 0, "failed": 0, "error": "pywebpush not installed"}
@@ -132,7 +138,13 @@ def send_notification(title: str, body: str, url: str = "/approvals", tag: str =
     from py_vapid import Vapid01
 
     vapid_obj = Vapid01.from_pem(vapid["private_key"].encode("utf8"))
-    payload = json.dumps({"title": title, "body": body, "url": url, "tag": tag})
+    payload = json.dumps({
+        "title": title,
+        "body": body,
+        "url": url,
+        "tag": tag,
+        "onlyWhenAway": only_when_away,
+    })
     sent, failed = 0, 0
     keep = []
     for sub in subs:

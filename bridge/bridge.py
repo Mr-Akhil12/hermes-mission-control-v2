@@ -27,7 +27,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 import push  # noqa: E402
 
 SAST = timezone(timedelta(hours=2))
-HERMES = Path(os.path.expanduser("~/.hermes"))
+HERMES = Path(
+    os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+).expanduser()
 JOBS = HERMES / "cron" / "jobs.json"
 EXEC = HERMES / "cron" / "executions.db"
 STATE = HERMES / "state.db"
@@ -116,7 +118,7 @@ def mirror_state() -> None:
 
     # Local cron jobs + executions
     if JOBS.exists():
-        state["crons"] = json.loads(JOBS.read_text())
+        state["crons"] = json.loads(JOBS.read_text(encoding="utf-8"))
     if EXEC.exists():
         con = sqlite3.connect(EXEC)
         rows = con.execute(
@@ -147,13 +149,13 @@ def _load_seen_fails() -> set:
     if not SEEN_FAILS.exists():
         return set()
     try:
-        return set(json.loads(SEEN_FAILS.read_text()))
+        return set(json.loads(SEEN_FAILS.read_text(encoding="utf-8")))
     except Exception:
         return set()
 
 
 def _save_seen_fails(seen: set) -> None:
-    SEEN_FAILS.write_text(json.dumps(sorted(seen)))
+    SEEN_FAILS.write_text(json.dumps(sorted(seen)), encoding="utf-8")
 
 
 def push_failed_crons() -> None:
@@ -330,7 +332,7 @@ def generate_brief() -> None:
     brief: dict[str, object] = {"attention": [], "shipped": [], "next_actions": [], "one_thing": None}
 
     if JOBS.exists():
-        jobs = json.loads(JOBS.read_text())
+        jobs = json.loads(JOBS.read_text(encoding="utf-8"))
         jobs_list = jobs if isinstance(jobs, list) else jobs.get("jobs", [])
         failed = [j for j in jobs_list if j.get("last_status") == "error"]
         brief["attention"] = [{"type": "failed_cron", "name": j.get("name"), "id": j.get("id")} for j in failed]
@@ -364,7 +366,7 @@ def brief_write_from_file(path: str) -> None:
         log(f"brief-write: file not found: {path}")
         sys.exit(1)
     try:
-        brief = json.loads(p.read_text())
+        brief = json.loads(p.read_text(encoding="utf-8"))
     except Exception as e:
         log(f"brief-write: invalid JSON: {e}")
         sys.exit(1)

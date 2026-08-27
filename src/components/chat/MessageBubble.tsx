@@ -4,7 +4,7 @@
 // rendering. Reasoning display respects the user's setting.
 
 import { memo, useState } from "react";
-import { Brain, ChevronDown, ChevronRight, Wrench, CheckCircle2, XCircle, Loader2, TerminalSquare, FileText, Globe, Search, Maximize2, CircleSlash2 } from "lucide-react";
+import { Brain, ChevronDown, ChevronRight, Wrench, CheckCircle2, XCircle, Loader2, Maximize2, CircleSlash2 } from "lucide-react";
 import type { ChatSettings, ChatMsg, ToolEvent, ToolCallInfo } from "@/lib/chat-types";
 import { ToolCallStack } from "./ToolCalls";
 import { ChainView } from "./ChainView";
@@ -155,6 +155,14 @@ export const MessageBubble = memo(function MessageBubble({
   // Ordered history structure: reasoning and tool calls interleaved as they
   // happened — renders like the live chain, never a flattened blob.
   const hasSegments = !isUser && !!msg.segments && msg.segments.length > 0;
+  const segmentReasoning = hasSegments
+    ? msg.segments!.filter((segment) => segment.kind === "reasoning")
+    : [];
+  const segmentTools = hasSegments
+    ? msg.segments!.flatMap((segment) => segment.kind === "tools" ? segment.calls : [])
+    : [];
+  const visibleHistoryTools = (hasSegments ? segmentTools : msg.toolCalls ?? []).slice(-3);
+  const totalHistoryTools = hasSegments ? segmentTools.length : msg.toolCalls?.length ?? 0;
 
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
@@ -166,11 +174,10 @@ export const MessageBubble = memo(function MessageBubble({
             : { background: "color-mix(in srgb, var(--bg) 60%, transparent)", color: "var(--text)", border: "1px solid var(--card-border)" }
         }
       >
-        {!isUser && hasSegments && (
+        {!isUser && segmentReasoning.length > 0 && (
           <div className="mb-2 space-y-2">
-            {msg.segments!.map((seg, i) =>
-              seg.kind === "reasoning" ? (
-                settings.reasoning !== "hidden" ? (
+            {segmentReasoning.map((seg, i) =>
+              settings.reasoning !== "hidden" ? (
                   <div
                     key={`r-${i}`}
                     className="whitespace-pre-wrap rounded-lg border-l-2 px-2.5 py-1.5 text-xs leading-relaxed"
@@ -178,31 +185,31 @@ export const MessageBubble = memo(function MessageBubble({
                   >
                     {settings.reasoning === "partial" && seg.text.length > 900 ? seg.text.slice(-900) : seg.text}
                   </div>
-                ) : null
-              ) : (
-                <div key={`t-${i}`}>
-                  <HistoryToolCalls calls={seg.calls} mode={settings.tools} />
-                </div>
-              )
+              ) : null
             )}
           </div>
         )}
         {!isUser && !hasSegments && msg.reasoning && (
           <ReasoningBlock text={msg.reasoning} mode={settings.reasoning} />
         )}
-        {!isUser && !hasSegments && msg.toolCalls && msg.toolCalls.length > 0 && (
-          <div className="mb-2">
-            <HistoryToolCalls calls={msg.toolCalls} mode={settings.tools} />
-          </div>
-        )}
-        {!isUser && tools && tools.length > 0 && (
-          <div className="mb-2">
-            <ToolCallStack tools={tools} mode={settings.tools} />
-          </div>
-        )}
         <div className="whitespace-pre-wrap break-words">
           <MarkdownLite text={msg.content} tone={isUser ? "user" : "assistant"} />
         </div>
+        {!isUser && visibleHistoryTools.length > 0 && (
+          <div className="mt-2">
+            {totalHistoryTools > visibleHistoryTools.length && (
+              <div className="mb-1 px-1 text-[10px]" style={{ color: "var(--text-faint)" }}>
+                Latest {visibleHistoryTools.length} of {totalHistoryTools} tool calls
+              </div>
+            )}
+            <HistoryToolCalls calls={visibleHistoryTools} mode={settings.tools} />
+          </div>
+        )}
+        {!isUser && tools && tools.length > 0 && (
+          <div className="mt-2">
+            <ToolCallStack tools={tools} mode={settings.tools} />
+          </div>
+        )}
         {!isUser && msg.stats && (msg.stats.model || msg.stats.tokens !== undefined) && (
           <div
             className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[9px]"

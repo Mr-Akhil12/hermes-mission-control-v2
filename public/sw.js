@@ -20,7 +20,13 @@ self.addEventListener("push", (event) => {
     vibrate: [200, 100, 200],
   };
 
-  event.waitUntil(self.registration.showNotification(data.title, options));
+  event.waitUntil(
+    clients.matchAll({ type: "window", includeUncontrolled: true }).then((windowClients) => {
+      const appIsVisible = windowClients.some((client) => client.visibilityState === "visible");
+      if (data.onlyWhenAway && appIsVisible) return undefined;
+      return self.registration.showNotification(data.title, options);
+    })
+  );
 });
 
 self.addEventListener("notificationclick", (event) => {
@@ -40,7 +46,7 @@ self.addEventListener("notificationclick", (event) => {
 // API routes are deliberately NOT cached (they're auth-gated and session
 // cookies are required) — offline just serves the app shell + last pages.
 
-const CACHE = "hermes-os-v1";
+const CACHE = "hermes-os-v2";
 const SHELL = ["/", "/chat", "/approvals", "/crons", "/dev", "/agents", "/sessions", "/channels", "/settings", "/trading", "/studio", "/personal", "/native"];
 
 self.addEventListener("install", (event) => {

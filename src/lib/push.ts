@@ -91,6 +91,28 @@ export async function testPush(): Promise<{ ok: boolean; error?: string }> {
   }
 }
 
+export function watchRunCompletion(options: {
+  runId: string;
+  sessionId: string;
+  url: string;
+  title?: string;
+}): void {
+  if (!options.runId || !options.sessionId) return;
+  void fetch("/api/push/watch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      run_id: options.runId,
+      session_id: options.sessionId,
+      url: options.url,
+      title: options.title ?? "Hermes replied",
+    }),
+    keepalive: true,
+  }).catch(() => {
+    // Streaming remains authoritative; push registration is best-effort.
+  });
+}
+
 function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
   const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
   const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");

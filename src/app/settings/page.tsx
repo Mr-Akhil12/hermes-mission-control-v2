@@ -44,7 +44,7 @@ export default function SettingsPage() {
     setPushMsg(null);
     const res = await enablePush();
     if (res.ok) {
-      setPushMsg({ ok: true, text: "Push notifications enabled. Approvals and failed crons will ping this device." });
+      setPushMsg({ ok: true, text: "Push notifications enabled. Replies, approvals, and failed crons will ping this device." });
       await refreshPush();
     } else {
       setPushMsg({ ok: false, text: res.error ?? "Failed to enable push." });
@@ -161,7 +161,7 @@ export default function SettingsPage() {
       <div className="card p-5">
         <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider" style={{ color: "var(--text-faint)" }}>Push notifications</h2>
         <p className="text-sm" style={{ color: "var(--text-dim)" }}>
-          Approvals and failed crons ping your phone even when the dashboard is closed. Works on installed PWA + desktop browsers.
+          Finished replies, approvals, and failed crons ping your phone when the dashboard is in the background or closed. Works on installed PWA + desktop browsers.
         </p>
         {!pushSupported ? (
           <div className="mt-3 rounded-lg p-3 text-xs" style={{ background: "rgba(255,92,92,0.10)", color: "var(--red)" }}>

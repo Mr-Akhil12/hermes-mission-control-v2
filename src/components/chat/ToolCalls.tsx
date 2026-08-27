@@ -2,16 +2,12 @@
 
 import {
   Wrench,
-  TerminalSquare,
-  FileText,
-  Globe,
-  Search,
-  Brain,
   CheckCircle2,
   XCircle,
   Loader2,
   CircleSlash2,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 import type { ToolEvent } from "@/lib/chat-types";
 
 // Friendly label per tool name — used in "summary" mode.
@@ -35,19 +31,6 @@ const TOOL_LABELS: Record<string, string> = {
   session_search: "Searching past sessions",
 };
 
-function toolIcon(name: string) {
-  const n = name.toLowerCase();
-  if (n.includes("terminal") || n.includes("execute") || n.includes("code"))
-    return <TerminalSquare className="h-3.5 w-3.5" />;
-  if (n.includes("file") || n.includes("patch") || n.includes("write") || n.includes("read"))
-    return <FileText className="h-3.5 w-3.5" />;
-  if (n.includes("search")) return <Search className="h-3.5 w-3.5" />;
-  if (n.includes("web") || n.includes("browser") || n.includes("http"))
-    return <Globe className="h-3.5 w-3.5" />;
-  if (n.includes("think")) return <Brain className="h-3.5 w-3.5" />;
-  return <Wrench className="h-3.5 w-3.5" />;
-}
-
 function prettyToolName(name: string) {
   return name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
@@ -61,13 +44,19 @@ export function ToolCallChip({
 }) {
   const done = tool.durationMs !== undefined;
   const failed = !!tool.error;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (done) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [done]);
   // ChatGPT-style: just the tool name, no preview clutter. The live elapsed
   // ticks every second via the page's busy-timer re-render — the pulse.
   const label =
     mode === "summary"
       ? TOOL_LABELS[tool.name] ?? `Using ${prettyToolName(tool.name)}`
       : prettyToolName(tool.name);
-  const elapsedMs = done ? (tool.durationMs ?? 0) : Math.max(0, Date.now() - (tool.startedAt ?? Date.now()));
+  const elapsedMs = done ? (tool.durationMs ?? 0) : Math.max(0, now - tool.startedAt);
 
   return (
     <div
@@ -125,10 +114,16 @@ export function ToolCallStack({
       </div>
     );
   }
+  const visibleTools = tools.slice(-3);
   return (
     <div className="flex max-w-full flex-col gap-1">
-      {tools.map((t, i) => (
-        <ToolCallChip key={`${t.name}-${i}`} tool={t} mode={mode} />
+      {tools.length > visibleTools.length && (
+        <div className="px-1 text-[10px]" style={{ color: "var(--text-faint)" }}>
+          Latest {visibleTools.length} of {tools.length} tool calls
+        </div>
+      )}
+      {visibleTools.map((t, i) => (
+        <ToolCallChip key={`${t.name}-${tools.length - visibleTools.length + i}`} tool={t} mode={mode} />
       ))}
     </div>
   );

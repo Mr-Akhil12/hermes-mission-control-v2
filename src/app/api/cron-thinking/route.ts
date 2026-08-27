@@ -2,9 +2,10 @@ import { NextResponse } from "next/server";
 import { existsSync } from "fs";
 import os from "os";
 import path from "path";
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 
-const STATE_DB = path.join(os.homedir(), ".hermes", "state.db");
+const HERMES_HOME = process.env.HERMES_HOME ?? path.join(os.homedir(), ".hermes");
+const STATE_DB = path.join(HERMES_HOME, "state.db");
 
 export async function GET(request: Request) {
   try {
@@ -15,7 +16,7 @@ export async function GET(request: Request) {
     if (!job) return NextResponse.json({ error: "job param required" }, { status: 400 });
     if (!existsSync(STATE_DB)) return NextResponse.json({ error: "state.db missing" }, { status: 404 });
 
-    const db = new Database(STATE_DB, { readonly: true });
+    const db = new DatabaseSync(STATE_DB, { readOnly: true });
 
     // Find the most recent cron session for this job
     let sessionId: string | undefined;

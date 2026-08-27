@@ -22,6 +22,7 @@ import queue
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -34,20 +35,30 @@ SAST = timezone(timedelta(hours=2))
 
 # Sentinel: handler already wrote a response; caller must not fall through.
 _RESPONDED = object()
-HERMES = Path(os.path.expanduser("~/.hermes"))
+HERMES = Path(
+    os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+).expanduser()
 JOBS = HERMES / "cron" / "jobs.json"
 EXEC = HERMES / "cron" / "executions.db"
 CRON_OUTPUT = HERMES / "cron" / "output"
 STATE = HERMES / "state.db"
 APPROVALS = HERMES / "approvals.json"
+CHAT_PUSH_SEEN = HERMES / "push_seen_chat_runs.json"
 GATEWAY_STATE = HERMES / "gateway_state.json"
 CHANNEL_DIR = HERMES / "channel_directory.json"
-VAULT_CONTENT = Path("/mnt/c/Users/pilla/Vault/second-brain/Content")
-VAULT_ROOT = Path("/mnt/c/Users/pilla/Vault/second-brain")
+VAULT_ROOT = Path(
+    os.environ.get(
+        "HERMES_VAULT_ROOT",
+        str(Path.home() / "Vault" / "second-brain"),
+    )
+)
+VAULT_CONTENT = VAULT_ROOT / "Content"
 MEMORY_DIR = HERMES / "memories"
 PORT = int(os.environ.get("STATE_PORT", "8645"))
 BRIDGE_TOKEN = os.environ.get("STATE_BRIDGE_TOKEN", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://hermes-mission-control-v2.vercel.app")
+_CHAT_PUSH_LOCK = threading.Lock()
+_CHAT_PUSH_WATCHING: set[str] = set()
 
 
 def load_approvals() -> list[dict]:
@@ -1145,6 +1156,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/push/test":
                 self._push_test()
                 return
+            if path == "/api/push/watch":
+                self._push_watch()
+                return
             # Content Studio: update a card's status (writes vault frontmatter)
             if path == "/api/content/status":
                 self._content_status()
@@ -1885,6 +1899,135 @@ class Handler(BaseHTTPRequestHandler):
             tag="hermes-test",
         )
         self._json(result)
+
+    def _push_watch(self) -> None:
+        """Watch one Hermes run and push its finished reply while the PWA is away."""
+        import re
+        import urllib.request as u
+
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length) if length else b"{}"
+        try:
+            data = json.loads(body)
+        except Exception:
+            self._json({"error": "invalid JSON"}, 400)
+            return
+
+        run_id = str(data.get("run_id") or "").strip()
+        session_id = str(data.get("session_id") or "").strip()
+        title = str(data.get("title") or "Hermes replied").strip()[:80]
+        url = str(data.get("url") or "/chat").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{6,160}", run_id) or not session_id:
+            self._json({"error": "valid run_id and session_id required"}, 400)
+            return
+        if not url.startswith("/") or url.startswith("//"):
+            url = "/chat"
+
+        try:
+            seen = set(json.loads(CHAT_PUSH_SEEN.read_text())) if CHAT_PUSH_SEEN.exists() else set()
+        except Exception:
+            seen = set()
+        with _CHAT_PUSH_LOCK:
+            if run_id in seen or run_id in _CHAT_PUSH_WATCHING:
+                self._json({"ok": True, "watching": False, "deduplicated": True})
+                return
+            _CHAT_PUSH_WATCHING.add(run_id)
+
+        api = _api_base()
+        headers = _api_headers()
+        # Preserve the caller's mirror prefix (/p/<profile>/… when multiplexed)
+        # so the watcher polls the same profile that owns the session. self.path
+        # here is the full state-server path (minus query); everything after
+        # "/api/push/watch" belongs to the profile mirror, so the prefix is
+        # simply whatever precedes "/api/push/watch".
+        mirror_prefix = ""
+        watch_path_idx = self.path.find("/api/push/watch")
+        if watch_path_idx > 0:
+            mirror_prefix = self.path[:watch_path_idx]
+
+        def _fetch_recent_messages() -> list[dict]:
+            poll_req = u.Request(
+                f"{api}{mirror_prefix}/api/sessions/{session_id}/messages?limit=10",
+                headers=headers,
+            )
+            with u.urlopen(poll_req, timeout=15) as poll_resp:
+                payload = json.loads(poll_resp.read().decode(errors="replace"))
+            rows = payload.get("data") if isinstance(payload, dict) else payload
+            return rows if isinstance(rows, list) else []
+
+        def _watch_completion() -> None:
+            # Session-chat streams (POST /api/sessions/{id}/chat/stream — the
+            # primary Chat + Voice path) never register in the Hermes API's
+            # /v1/runs event registry, so GET /v1/runs/{run_id}/events returns
+            # run_not_found for them (verified live 2026-08-27). Instead of
+            # subscribing to a stream that may never exist, poll the session's
+            # persisted messages for a terminal assistant row that arrived
+            # after registration. finish_reason 'stop' marks the final turn
+            # row; 'tool_calls' rows are intermediate tool-loop rows.
+            baseline_ts = 0.0
+            try:
+                for row in _fetch_recent_messages():
+                    try:
+                        ts = float(row.get("timestamp") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    baseline_ts = max(baseline_ts, ts)
+            except Exception:
+                baseline_ts = 0.0
+            # 3s grace: a run that finishes between registration and this
+            # baseline fetch would otherwise swallow its own completion row.
+            baseline_ts = max(0.0, baseline_ts - 3.0)
+
+            final_text = ""
+            deadline = time.time() + 1800  # 30 min cap, 5s poll
+            while time.time() < deadline:
+                time.sleep(5)
+                try:
+                    rows = _fetch_recent_messages()
+                except Exception:
+                    continue
+                for row in rows:
+                    if row.get("role") != "assistant":
+                        continue
+                    if row.get("finish_reason") not in ("stop", "length", "content_filter"):
+                        continue
+                    try:
+                        ts = float(row.get("timestamp") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if ts <= baseline_ts:
+                        continue
+                    content = row.get("content")
+                    if isinstance(content, str) and content.strip():
+                        final_text = content
+                        break
+                if final_text:
+                    break
+
+            if final_text:
+                preview = " ".join(final_text.replace("\n", " ").split())
+                body_text = preview[:180] if preview else "Your response is ready — tap to open the conversation."
+                push.send_notification(
+                    title,
+                    body_text,
+                    url=url,
+                    tag=f"chat-complete-{run_id}",
+                    only_when_away=True,
+                )
+                with _CHAT_PUSH_LOCK:
+                    try:
+                        persisted = set(json.loads(CHAT_PUSH_SEEN.read_text())) if CHAT_PUSH_SEEN.exists() else set()
+                    except Exception:
+                        persisted = set()
+                    persisted.add(run_id)
+                    CHAT_PUSH_SEEN.write_text(json.dumps(sorted(persisted)[-2000:], indent=1), encoding="utf-8")
+            else:
+                print(f"[state-server] chat push watcher ended without completion for {run_id}", flush=True)
+            with _CHAT_PUSH_LOCK:
+                _CHAT_PUSH_WATCHING.discard(run_id)
+
+        threading.Thread(target=_watch_completion, daemon=True).start()
+        self._json({"ok": True, "watching": True, "run_id": run_id})
 
     def _content_status(self) -> None:
         """Update a content card's status (writes vault frontmatter)."""

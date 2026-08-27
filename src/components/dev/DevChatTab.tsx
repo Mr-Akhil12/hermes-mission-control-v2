@@ -21,6 +21,7 @@ import type {
   ToolCallInfo,
   ToolEvent,
 } from "@/lib/chat-types";
+import { watchRunCompletion } from "@/lib/push";
 
 export type Project = {
   name: string;
@@ -247,6 +248,8 @@ export default function DevChatTab({ project }: { project: Project }) {
   const [streaming, setStreaming] = useState(false);
   const [live, setLive] = useState<LiveReply | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesViewportRef = useRef<HTMLDivElement>(null);
+  const followLatestRef = useRef(true);
   const streamAbortRef = useRef<AbortController | null>(null);
 
   const endpoint = `/api/dev/projects/${encodeURIComponent(project.name)}/chat`;
@@ -309,8 +312,28 @@ export default function DevChatTab({ project }: { project: Project }) {
     };
   }, [loadConversation]);
 
+  const updateFollowLatest = useCallback(() => {
+    const viewport = messagesViewportRef.current;
+    if (!viewport) return;
+    followLatestRef.current =
+      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 96;
+  }, []);
+
+  const pinToLatest = useCallback(() => {
+    followLatestRef.current = true;
+    requestAnimationFrame(() => {
+      const viewport = messagesViewportRef.current;
+      if (viewport) viewport.scrollTop = viewport.scrollHeight;
+    });
+  }, []);
+
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (!followLatestRef.current) return;
+    const frame = requestAnimationFrame(() => {
+      const viewport = messagesViewportRef.current;
+      if (viewport) viewport.scrollTop = viewport.scrollHeight;
+    });
+    return () => cancelAnimationFrame(frame);
   }, [messages, live, streamError]);
 
   useEffect(
@@ -339,6 +362,7 @@ export default function DevChatTab({ project }: { project: Project }) {
           ]
         : cleanHistory;
 
+      pinToLatest();
       setMessages(outboundMessages);
       setInput("");
       setStreamError(null);
@@ -410,6 +434,7 @@ export default function DevChatTab({ project }: { project: Project }) {
         let reasoning = "";
         let tools: ToolEvent[] = [];
         let phase = "Thinking…";
+        let completionWatchRegistered = false;
 
         const publish = () => {
           setLive({
@@ -506,6 +531,18 @@ export default function DevChatTab({ project }: { project: Project }) {
 
           switch (event) {
             case "run.started":
+              if (!completionWatchRegistered && activeSessionId) {
+                const runId = payloadString(payload, "run_id");
+                if (runId) {
+                  completionWatchRegistered = true;
+                  watchRunCompletion({
+                    runId,
+                    sessionId: activeSessionId,
+                    url: "/dev",
+                    title: `${project.name} reply ready`,
+                  });
+                }
+              }
               phase = "Initializing…";
               publish();
               break;
@@ -640,7 +677,7 @@ export default function DevChatTab({ project }: { project: Project }) {
         setStreaming(false);
       }
     },
-    [endpoint, failedTurn, messages, sessionId, streaming]
+    [endpoint, failedTurn, messages, sessionId, streaming, pinToLatest, project.name]
   );
 
   const submit = () => {
@@ -674,7 +711,11 @@ export default function DevChatTab({ project }: { project: Project }) {
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
+      <div
+        ref={messagesViewportRef}
+        onScroll={updateFollowLatest}
+        className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4"
+      >
         {loading ? (
           <div
             className="flex h-full items-center justify-center gap-2 text-sm"
