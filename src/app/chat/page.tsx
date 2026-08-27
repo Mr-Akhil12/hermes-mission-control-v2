@@ -914,6 +914,21 @@ export default function ChatPage() {
         if (!preserveRestoredFinal) {
           messagesRef.current = msgs;
           setMessages(msgs);
+          // A freshly opened/switched conversation must land on the newest
+          // message, not the top. Reset the follow flag and pin AFTER the
+          // commit — double-rAF so the (possibly huge) transcript has laid
+          // out before we measure scrollHeight. Session switches previously
+          // inherited a stale followLatestRef=false from scrolling in the
+          // prior conversation, landing the user at the oldest message.
+          followLatestRef.current = true;
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() => {
+              const viewport = messagesViewportRef.current;
+              if (viewport && activeIdRef.current === id) {
+                viewport.scrollTop = viewport.scrollHeight;
+              }
+            })
+          );
         } else {
           dbg("loadMessages", "kept newer restored final while persistence catches up", { sessionId: id });
         }
@@ -3508,7 +3523,7 @@ export default function ChatPage() {
                 busy={busy}
                 settings={settings}
               />
-              {busy && <PhaseBanner phase={live.phase} toolCount={live.toolCount} elapsedSec={elapsedSec} />}
+              {busy && <PhaseBanner phase={live.phase} toolCount={live.toolCount} elapsedSec={elapsedSec} sessionUsage={(() => { const s = sessions.find((x) => x.id === activeId); return s ? { input_tokens: s.input_tokens } : null; })()} />}
               {busy && renderLiveContent()}
               <div ref={bottomRef} />
             </div>

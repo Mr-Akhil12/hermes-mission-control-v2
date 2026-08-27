@@ -290,6 +290,15 @@ export default function DevChatTab({ project }: { project: Project }) {
         setMessages(
           normalizeHistory(Array.isArray(payload.messages) ? payload.messages : [])
         );
+        // A freshly loaded conversation opens on the newest message, not the
+        // oldest — pin after the transcript lays out (double-rAF).
+        followLatestRef.current = true;
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            const viewport = messagesViewportRef.current;
+            if (viewport) viewport.scrollTop = viewport.scrollHeight;
+          })
+        );
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") return;
         setLoadError(error instanceof Error ? error.message : String(error));
