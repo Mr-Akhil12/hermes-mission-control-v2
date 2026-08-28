@@ -911,7 +911,23 @@ class Handler(BaseHTTPRequestHandler):
                     except (BrokenPipeError, ConnectionResetError):
                         break
         except Exception as e:
-            self._json({"error": str(e)}, 502)
+            # Upstream failure (404 = no such session/endpoint, 5xx, connect
+            # error): answer as an SSE terminal error frame, NOT a JSON 502.
+            # The PWA's reattach loop reads SSE — a JSON 502 makes it retry
+            # forever (2026-08-28: /events 502 every ~2s, eternal shimmer).
+            # event:error is a terminal frame client-side, so the UI stops
+            # polling and settles. HTTP status stays 200 so the reader runs.
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache, no-transform")
+                self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
+                self.end_headers()
+                err = json.dumps({"error": str(e), "terminal": True})
+                self.wfile.write(f"event: error\ndata: {err}\n\n".encode())
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     def _proxy_api_get(self, path: str) -> None:
         """Forward a GET to the Hermes API (:8642) — session list/messages."""

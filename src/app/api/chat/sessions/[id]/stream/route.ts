@@ -6,6 +6,14 @@ import { withProfile } from "@/lib/profiles";
 // Pipes SSE from the Hermes API (via state server tunnel) straight to the
 // browser so tokens + thinking appear in real time.
 // ?profile=<id> routes to that Hermes multiplex profile.
+//
+// maxDuration: this function pipes the WHOLE live run — thinking prefill on
+// big sessions alone can exceed a minute. The platform default (30s) made
+// Vercel kill the pipe mid-run; the API server then saw its SSE client
+// disconnect and INTERRUPTED the live run (2026-08-28 Hush incident: 30.0s
+// cut, eternal "thinking"). 300s = Fluid max on Hobby; Vercel clamps to the
+// plan limit automatically.
+export const maxDuration = 300;
 
 export async function POST(
   request: NextRequest,

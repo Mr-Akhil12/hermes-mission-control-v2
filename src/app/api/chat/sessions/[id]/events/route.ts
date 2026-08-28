@@ -7,6 +7,11 @@ import { withProfile } from "@/lib/profiles";
 // Replays missed events (reasoning/tools/messages) since the client's last
 // seen seq, then tails live — so leaving the page or hopping devices never
 // breaks the stream.
+//
+// maxDuration: same rationale as the stream route — this tails a LIVE run
+// that can legitimately run for minutes. 30s default killed the reattach
+// too (the post-cut recovery loop 502'd forever on 2026-08-28).
+export const maxDuration = 300;
 
 export async function GET(
   request: NextRequest,
