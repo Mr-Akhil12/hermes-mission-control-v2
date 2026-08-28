@@ -216,8 +216,22 @@ export const MessageBubble = memo(function MessageBubble({
             style={{ color: "var(--text-faint)" }}
           >
             {msg.stats.model && <span>{msg.stats.model}</span>}
-            {msg.stats.tokens !== undefined && msg.stats.tokens > 0 && (
-              <span>{msg.stats.tokens.toLocaleString()} tokens</span>
+            {/* PER-REPLY in/out when available (live runs stamp these at
+                run.completed). The bare "N tokens" fallback only shows for
+                history rows without per-run usage. */}
+            {msg.stats.input_tokens !== undefined && msg.stats.input_tokens > 0 ? (
+              <>
+                <span title="Input tokens for THIS reply — what this turn cost to send (context + message)">
+                  in {msg.stats.input_tokens.toLocaleString()}
+                </span>
+                <span title="Output tokens generated for THIS reply">
+                  · out {(msg.stats.output_tokens ?? 0).toLocaleString()}
+                </span>
+              </>
+            ) : (
+              msg.stats.tokens !== undefined && msg.stats.tokens > 0 && (
+                <span>{msg.stats.tokens.toLocaleString()} tokens</span>
+              )
             )}
           </div>
         )}

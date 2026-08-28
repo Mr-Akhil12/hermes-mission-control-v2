@@ -1250,12 +1250,15 @@ export default function ChatPage() {
               "",
               `Messages in session: ${sess?.message_count ?? messages.length}`,
               `API calls: ${calls.toLocaleString()}`,
+              `Last reply: ${lastStats?.usage?.input_tokens?.toLocaleString() ?? "—"} in / ${lastStats?.usage?.output_tokens?.toLocaleString() ?? "—"} out`,
+              "",
+              "Lifetime (this session's whole history):",
               `Input tokens (cumulative): ${inp.toLocaleString()}`,
               `Output tokens (cumulative): ${out.toLocaleString()}`,
               `Total (cumulative): ${tot.toLocaleString()}`,
               `Cache read: ${cacheRead.toLocaleString()} · write: ${cacheWrite.toLocaleString()}`,
               `Reasoning tokens: ${reasoning.toLocaleString()}`,
-              "These are REAL cumulative session numbers — they add up over time and persist across runs.",
+              "Cumulative numbers add up over time (every turn re-sends context) — the per-reply line is what THIS conversation costs per message.",
             ].join("\n");
             setMessages((m) => [...m, { role: "system", content: out2 }]);
           }
@@ -2078,7 +2081,8 @@ export default function ChatPage() {
                 }
                 // Attach per-message stats to the final assistant bubble so the
                 // model + token count show at the end of the message (replaces
-                // the old persistent footer bar).
+                // the old persistent footer bar). input/output are PER-REPLY
+                // usage from this run — never the session lifetime sum.
                 if (activeIdRef.current === sessionId) setMessages((prev) => {
                   const copy = [...prev];
                   for (let i = copy.length - 1; i >= 0; i--) {
@@ -2088,6 +2092,8 @@ export default function ChatPage() {
                         stats: {
                           model: runRuntime?.model ?? MODEL,
                           tokens: runUsage?.total_tokens ?? runUsage?.input_tokens ?? undefined,
+                          input_tokens: runUsage?.input_tokens,
+                          output_tokens: runUsage?.output_tokens,
                         },
                       };
                       break;
@@ -3541,7 +3547,7 @@ export default function ChatPage() {
                 busy={busy}
                 settings={settings}
               />
-              {busy && <PhaseBanner phase={live.phase} toolCount={live.toolCount} elapsedSec={elapsedSec} sessionUsage={(() => { const s = sessions.find((x) => x.id === activeId); return s ? { input_tokens: s.input_tokens } : null; })()} />}
+              {busy && <PhaseBanner phase={live.phase} toolCount={live.toolCount} elapsedSec={elapsedSec} sessionUsage={(() => { const u = live.stats?.usage ?? null; return u ? { input_tokens: u.input_tokens ?? 0 } : null; })()} />}
               {busy && renderLiveContent()}
               <div ref={bottomRef} />
             </div>

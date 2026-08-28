@@ -158,14 +158,15 @@ export function RunStatsFooter({
           approaching compaction
         </span>
       )}
-      <span className="flex items-center gap-1" title="Input tokens — real cumulative session context sent to the model">
-        ⬇ {fmtTokens(sessionUsage?.input_tokens ?? 0)}
+      {/* PER-REPLY usage (last run only) — not the session lifetime sum.
+          The lifetime counter (232M on Hush) is meaningless to read per turn;
+          this answers "what did THIS reply cost". While running, output is
+          live; input arrives with run.completed. */}
+      <span className="flex items-center gap-1" title="Input tokens for the LAST reply — what this turn cost to send (context + message)">
+        in {fmtTokens(lastRunIn || (live ? 0 : undefined))}
       </span>
-      <span className="flex items-center gap-1" title="Output tokens — real cumulative session output (+ live in-flight estimate while running)">
-        ⬆ {fmtTokens((sessionUsage?.output_tokens ?? 0) + liveOut)}
-      </span>
-      <span className="flex items-center gap-1" title="Total tokens — real cumulative session total">
-        Σ {fmtTokens((sessionUsage?.input_tokens ?? 0) + (sessionUsage?.output_tokens ?? 0) + liveOut)}
+      <span className="flex items-center gap-1" title="Output tokens for the LAST reply (live while streaming)">
+        out {fmtTokens((stats?.usage?.output_tokens ?? 0) > 0 ? stats?.usage?.output_tokens : live ? liveOut : undefined)}
       </span>
       <span className="ml-auto">
         {live ? "running…" : `${fmtDuration(stats?.durationMs)} total`}
