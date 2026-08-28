@@ -2585,7 +2585,13 @@ export default function ChatPage() {
               }
             } else if (payload.event === "done" || payload.event === "error") {
               if (payload.event === "error" && activeIdRef.current === sessionId) {
-                setError(payload.error ?? payload.message ?? "Stream error");
+                // "no live run" is the normal reattach answer when nothing is
+                // running (page reload, run already finished) — not an error
+                // worth a red banner. Only surface real failures.
+                const errMsg = String(payload.error ?? payload.message ?? "Stream error");
+                if (!/no live run|404|not found/i.test(errMsg)) {
+                  setError(errMsg);
+                }
               }
               commitReattachLive((p) => ({
                 ...settleLiveState(p),
