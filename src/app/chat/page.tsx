@@ -1687,24 +1687,57 @@ export default function ChatPage() {
       try {
         // Prefer DIRECT-to-funnel streaming (ticket-gated): Vercel's function
         // cap kills SSE pipes mid-run; the funnel is a raw proxy with no cap.
-        // Fall back to the Vercel route when a ticket can't be minted
-        // (state server down, funnel offline, etc.).
-        let streamUrl = `/api/chat/sessions/${sessionId}/stream`;
-        let streamHeaders: Record<string, string> = { "Content-Type": "application/json" };
+        // Fall back to the Vercel route when a ticket can't be minted OR the
+        // funnel doesn't answer headers within 8s (e.g. Chrome on the
+        // Tailscale host itself can't hairpin to its own funnel — the phone
+        // is the real client and has no such issue). The probe IS the real
+        // stream request: if it answers headers in time we consume it as the
+        // stream; if not, we abort it (which also frees the single-use
+        // ticket — the upstream run just never started) and re-send through
+        // the Vercel proxy.
+        let res: Response;
         const ticket = sessionId ? await mintStreamTicket(String(sessionId)) : null;
         if (ticket) {
-          streamUrl = directStreamUrl(String(sessionId));
-          streamHeaders = directStreamHeaders(ticket);
-          dbg("stream", "using DIRECT funnel stream", { sessionId });
+          const probe = new AbortController();
+          const probeTimer = setTimeout(() => probe.abort(), 8000);
+          let direct: Response | null = null;
+          try {
+            direct = await fetch(directStreamUrl(String(sessionId)), {
+              method: "POST",
+              headers: { ...directStreamHeaders(ticket), "Content-Type": "application/json" },
+              body: JSON.stringify({ message: trimmed, model: effectiveModel || undefined, profile }),
+              signal: probe.signal,
+            });
+          } catch {
+            direct = null;
+          } finally {
+            clearTimeout(probeTimer);
+          }
+          if (direct && direct.ok && direct.body) {
+            dbg("stream", "using DIRECT funnel stream", { sessionId });
+            res = direct;
+          } else {
+            // Kill the direct attempt if it's still hanging; the ticket is
+            // single-use and may be consumed server-side — the fallback
+            // re-auths with the bridge token via the Vercel route.
+            try { direct?.body?.cancel(); } catch {}
+            dbg("stream", "funnel not answering — using Vercel proxy", { sessionId });
+            res = await fetch(`/api/chat/sessions/${sessionId}/stream`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ message: trimmed, model: effectiveModel || undefined, profile }),
+              signal: abort.signal,
+            });
+          }
         } else {
           dbg("stream", "ticket unavailable — using Vercel proxy", { sessionId });
+          res = await fetch(`/api/chat/sessions/${sessionId}/stream`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message: trimmed, model: effectiveModel || undefined, profile }),
+            signal: abort.signal,
+          });
         }
-        const res = await fetch(streamUrl, {
-          method: "POST",
-          headers: streamHeaders,
-          body: JSON.stringify({ message: trimmed, model: effectiveModel || undefined, profile }),
-          signal: abort.signal,
-        });
         dbg("stream", `POST /stream http=${res.status}`, { sessionId, msgLen: trimmed.length });
         if (!res.ok || !res.body) {
           const text = await res.text().catch(() => "");
