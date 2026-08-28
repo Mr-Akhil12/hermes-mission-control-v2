@@ -161,6 +161,26 @@ def load_cron_output(job_id: str, filename: str | None = None) -> dict:
     }
 
 
+def default_model() -> str:
+    """The gateway's active default model (config.yaml model.default).
+
+    The dashboard reads this so new chat sessions pin the REAL brain —
+    never a hardcoded name (the PWA hardcoded deepseek-v4-flash:0731 until
+    2026-08-28, so new sessions kept stamping deepseek after the switch to
+    glm). Returns "" when config.yaml is unreadable; clients fall back.
+    """
+    try:
+        text = (HERMES / "config.yaml").read_text()
+        import re as _re
+
+        m = _re.search(r"^model:\s*\n\s*default:\s*(\S+)", text, _re.M)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return ""
+
+
 def load_profiles() -> list[dict]:
     """List multiplex profiles (dirs under ~/.hermes/profiles/) with their
     metadata — model, description, whether they're in the gateway allowlist.
@@ -771,7 +791,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/runs":
                 self._json({"runs": load_runs(), "source": "local"})
             elif path == "/api/profiles":
-                self._json({"profiles": load_profiles(), "source": "local"})
+                self._json(
+                    {"profiles": load_profiles(), "default_model": default_model(), "source": "local"}
+                )
             elif path == "/api/delegations":
                 self._json({"delegations": load_delegations(), "source": "local"})
             elif path == "/api/sessions":

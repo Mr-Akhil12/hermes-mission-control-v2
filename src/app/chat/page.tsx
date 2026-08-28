@@ -453,14 +453,21 @@ export default function ChatPage() {
   // created via `hermes profile create` — e.g. ox-alpha). Merged with the
   // static fallback list; deduped by id, live list wins.
   const [extraProfiles, setExtraProfiles] = useState<ChatProfile[]>([]);
+  // The gateway's live default model (config.yaml model.default), fetched
+  // with the profile list. Used for NEW default-profile sessions instead of
+  // a hardcoded name — switching brains in Hermes config updates the
+  // dashboard automatically.
+  const [gatewayModel, setGatewayModel] = useState<string>("");
 
   // The model a NEW session / stream should pin. When a multiplex profile is
   // selected (ox-alpha, coder, ...), use THAT profile's configured model so
   // the chat actually runs on the profile's brain — never the hardcoded
-  // default. Only the default profile (empty id) uses DEFAULT_MODEL.
+  // default. The default profile (empty id) uses the gateway's LIVE
+  // default_model (fetched with the profile list), falling back to the
+  // static DEFAULT_MODEL only when the state server is unreachable.
   const allProfiles: ChatProfile[] = extraProfiles.length > 0 ? extraProfiles : PROFILES;
   const activeProfile = allProfiles.find((p) => p.id === profile);
-  const effectiveModel = activeProfile?.model || (profile ? "" : MODEL);
+  const effectiveModel = activeProfile?.model || (profile ? "" : gatewayModel || MODEL);
   const [restoreReady, setRestoreReady] = useState(false);
   const restoredSessionIdRef = useRef<string | null>(null);
   const initialReconcileStartedRef = useRef(false);
@@ -528,6 +535,11 @@ export default function ChatPage() {
         if (cancelled) return;
         const live = (d?.profiles ?? []) as { name: string; description?: string; model?: string }[];
         const byName = new Map(live.map((p) => [p.name, p]));
+        // The gateway's active default model — live from config.yaml, never
+        // hardcoded. Empty string = state server unreachable; the page then
+        // falls back to the static DEFAULT_MODEL import.
+        const dm = typeof d?.default_model === "string" ? d.default_model.trim() : "";
+        if (dm) setGatewayModel(dm);
         // Enrich every known profile with its live model (coder, verifier, …),
         // and append any profile not in the static list (e.g. ox-alpha).
         const merged = PROFILES.map((p) => {

@@ -48,14 +48,18 @@ def get_vapid() -> dict:
     format (BEGIN EC PRIVATE KEY) — pywebpush cannot deserialize PKCS8
     (BEGIN PRIVATE KEY) and fails with 'ASN.1 parsing error: invalid length'.
     """
+    if not _AVAILABLE:
+        raise RuntimeError("pywebpush/py_vapid not installed in this Python environment")
     if VAPID_FILE.exists():
         try:
             keys = json.loads(VAPID_FILE.read_text())
             # Migrate a PKCS8 private key (old format) to SEC1 so pywebpush
             # can use it — otherwise every send fails to deserialize.
             if "BEGIN PRIVATE KEY" in keys.get("private_key", ""):
-                from cryptography.hazmat.primitives import serialization
-
+                # NOTE: use the module-level `serialization` import here — a
+                # function-local import would shadow the name and crash the
+                # generation path below with UnboundLocalError when the key
+                # file doesn't exist yet (Windows-native stack, 2026-08-28).
                 k = serialization.load_pem_private_key(keys["private_key"].encode(), password=None)
                 keys["private_key"] = k.private_bytes(
                     serialization.Encoding.PEM,

@@ -15,3 +15,7 @@ export async function GET(_request: NextRequest) {
     return NextResponse.json({ error: String(e) }, { status: 502 });
   }
 }
+
+// NOTE: the state server response also carries `default_model` — the
+// gateway's live config.yaml model.default. The chat page uses it to pin
+// new sessions to the real brain instead of a hardcoded model name.
