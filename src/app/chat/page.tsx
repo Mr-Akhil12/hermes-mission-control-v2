@@ -18,6 +18,7 @@ import { BrowserView } from "@/components/chat/BrowserView";
 import { ChainView } from "@/components/chat/ChainView";
 import { ToolCallStack } from "@/components/chat/ToolCalls";
 import { DEFAULT_MODEL as MODEL } from "@/lib/models";
+import { mintStreamTicket, directStreamUrl, directStreamHeaders } from "@/lib/direct-stream";
 import { dbg, toolSnap, liveSnap } from "@/lib/chat-debug";
 import { watchRunCompletion } from "@/lib/push";
 
@@ -1684,9 +1685,23 @@ export default function ChatPage() {
       };
 
       try {
-        const res = await fetch(`/api/chat/sessions/${sessionId}/stream`, {
+        // Prefer DIRECT-to-funnel streaming (ticket-gated): Vercel's function
+        // cap kills SSE pipes mid-run; the funnel is a raw proxy with no cap.
+        // Fall back to the Vercel route when a ticket can't be minted
+        // (state server down, funnel offline, etc.).
+        let streamUrl = `/api/chat/sessions/${sessionId}/stream`;
+        let streamHeaders: Record<string, string> = { "Content-Type": "application/json" };
+        const ticket = sessionId ? await mintStreamTicket(String(sessionId)) : null;
+        if (ticket) {
+          streamUrl = directStreamUrl(String(sessionId));
+          streamHeaders = directStreamHeaders(ticket);
+          dbg("stream", "using DIRECT funnel stream", { sessionId });
+        } else {
+          dbg("stream", "ticket unavailable — using Vercel proxy", { sessionId });
+        }
+        const res = await fetch(streamUrl, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: streamHeaders,
           body: JSON.stringify({ message: trimmed, model: effectiveModel || undefined, profile }),
           signal: abort.signal,
         });

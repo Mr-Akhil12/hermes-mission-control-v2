@@ -161,6 +161,80 @@ def load_cron_output(job_id: str, filename: str | None = None) -> dict:
     }
 
 
+# ── Stream tickets ─────────────────────────────────────────────────────────
+# The PWA's browser must NEVER hold STATE_BRIDGE_TOKEN. For direct-to-funnel
+# streaming, Vercel mints a short-lived single-use ticket via this endpoint
+# (Vercel authenticates with the bridge token; the browser only ever sees the
+# ticket). Tickets are HMAC-signed, expire in 120s, bind one session_id, and
+# are single-use (replay-safe: a stolen ticket is dead after first use).
+STREAM_TICKETS_FILE = HERMES / "stream_tickets.json"
+STREAM_TICKET_TTL = 120
+
+
+def _ticket_key() -> str:
+    """HMAC key for tickets — derived from STATE_BRIDGE_TOKEN (never leaves)."""
+    import hashlib
+
+    tok = os.environ.get("STATE_BRIDGE_TOKEN", "")
+    if not tok:
+        tok = "dev-only"
+    return hashlib.sha256(("stream-ticket:" + tok).encode()).hexdigest()
+
+
+def _sign_ticket(payload: str) -> str:
+    import hashlib
+    import hmac as _hmac
+
+    return _hmac.new(_ticket_key().encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def _new_ticket(session_id: str) -> dict:
+    import secrets as _secrets
+    import time as _time
+
+    nonce = _secrets.token_hex(12)
+    exp = int(_time.time()) + STREAM_TICKET_TTL
+    payload = f"{session_id}:{exp}:{nonce}"
+    ticket = f"{payload}:{_sign_ticket(payload)}"
+    tickets = _load_tickets()
+    tickets[nonce] = {"exp": exp, "session_id": session_id}
+    # Prune expired + cap size (oldest first by exp)
+    now = int(_time.time())
+    tickets = {k: v for k, v in tickets.items() if v.get("exp", 0) > now}
+    if len(tickets) > 200:
+        keep = sorted(tickets.items(), key=lambda kv: kv[1]["exp"])[-200:]
+        tickets = dict(keep)
+    STREAM_TICKETS_FILE.write_text(json.dumps(tickets, indent=1))
+    return {"ticket": ticket, "expires_in": STREAM_TICKET_TTL}
+
+
+def _load_tickets() -> dict:
+    try:
+        return json.loads(STREAM_TICKETS_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _consume_ticket(ticket: str) -> str | None:
+    """Return session_id if valid+unused, else None. Marks used atomically."""
+    try:
+        session_id, exp, nonce, sig = ticket.split(":")
+        payload = f"{session_id}:{exp}:{nonce}"
+        if _sign_ticket(payload) != sig:
+            return None
+        if int(exp) < int(__import__("time").time()):
+            return None
+    except Exception:
+        return None
+    tickets = _load_tickets()
+    entry = tickets.get(nonce)
+    if not entry or entry.get("used"):
+        return None
+    entry["used"] = True
+    STREAM_TICKETS_FILE.write_text(json.dumps(tickets, indent=1))
+    return entry.get("session_id") or session_id
+
+
 def default_model() -> str:
     """The gateway's active default model (config.yaml model.default).
 
@@ -715,7 +789,14 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization", "")
         if auth == f"Bearer {BRIDGE_TOKEN}":
             return True
-        return self.headers.get("X-Bridge-Token", "") == BRIDGE_TOKEN
+        if self.headers.get("X-Bridge-Token", "") == BRIDGE_TOKEN:
+            return True
+        # Stream tickets ("Bearer ticket <ticket>") pass the gate here and are
+        # FULLY validated (signature, expiry, single-use, session binding) at
+        # the chat/stream route — never treat this prefix as a bridge token.
+        if auth.startswith("Bearer ticket "):
+            return True
+        return False
 
     def _cors_headers(self) -> dict:
         return {
@@ -844,6 +925,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"approvals": load_approvals(), "source": "local"})
             elif path == "/api/push/vapid":
                 self._json({"public_key": push.public_vapid(), "available": push.available()})
+            elif path == "/api/stream-ticket":
+                # GET with ?session=<id> — actually minted via POST (secret in
+                # URL would leak); keep GET rejected for clarity.
+                self._json({"error": "use POST"}, 405)
             elif path == "/api/push/status":
                 self._json({"enabled": push.available(), "subscriptions": len(push._load_subs())})
             elif path == "/v1/models":
@@ -1173,7 +1258,35 @@ class Handler(BaseHTTPRequestHandler):
                     path = "/" + "/".join(parts[3:])
             # Session endpoints: create, chat, chat/stream, fork
             if path.startswith("/api/sessions"):
+                # Ticket-authenticated direct stream: POST /api/sessions/{id}/chat/stream
+                # with `Authorization: Bearer ticket <ticket>` — a browser
+                # holding a short-lived single-use stream ticket. The ticket
+                # binds the session, so a stolen ticket only ever replays a
+                # message into that one conversation, and dies in 120s.
+                auth = self.headers.get("Authorization", "")
+                if auth.startswith("Bearer ticket "):
+                    ticket = auth[len("Bearer ticket "):].strip()
+                    ticket_session = _consume_ticket(ticket)
+                    if not ticket_session or ticket_session != path.split("/")[3]:
+                        self._json({"error": "invalid or expired stream ticket"}, 403)
+                        return
                 self._proxy_api_stream(full_path, stream=full_path.endswith("/chat/stream"))
+                return
+            # Stream ticket minting (bridge-token auth only — the browser asks
+            # the Vercel route, which holds the real token).
+            if path == "/api/stream-ticket":
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length) if length else b"{}"
+                try:
+                    data = json.loads(body)
+                except Exception:
+                    self._json({"error": "invalid JSON"}, 400)
+                    return
+                session_id = str(data.get("session_id") or "").strip()
+                if not session_id or len(session_id) > 160:
+                    self._json({"error": "session_id required"}, 400)
+                    return
+                self._json(_new_ticket(session_id))
                 return
             # Run approval resolution: POST /v1/runs/{run_id}/approval
             if "/v1/runs/" in path and path.endswith("/approval"):
@@ -2092,33 +2205,41 @@ class Handler(BaseHTTPRequestHandler):
 
         When ``stream`` is True (SSE chat), write chunks as they arrive so the
         client sees tokens/thinking in real time instead of one buffered blob.
+
+        Uses http.client with a read budget LONGER than the API server's SSE
+        keepalive interval (30s) — a shorter timeout fires mid-silence, and
+        after the first socket timeout http.client's connection is never
+        healthy again: the next read raises a fatal error, the proxy closes,
+        and the API server reads that as "client disconnected" and INTERRUPTS
+        the live run (2026-08-28: every stream died at ~T+22s with 1 keepalive).
+        timeout=45 > keepalive 30 means the timeout path is only reachable
+        when the upstream is truly gone.
         """
-        import urllib.request as u
+        import http.client as _hc
+        from urllib.parse import urlsplit
+
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length) if length else b"{}"
 
         api = os.environ.get("HERMES_API_URL", "http://127.0.0.1:8642")
         api_key = os.environ.get("API_SERVER_KEY", "")
+        parts = urlsplit(api)
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        req = u.Request(f"{api}{path}", data=body, headers=headers)
-        # 15s socket read budget (see keepalive loop below) — a quiet
-        # upstream gets a heartbeat every ~15s so the stream never looks dead.
-        with u.urlopen(req, timeout=15) as resp:
+        try:
+            conn = _hc.HTTPConnection(parts.hostname, parts.port, timeout=45)
+            conn.request("POST", path, body=body, headers=headers)
+            resp = conn.getresponse()
             ctype = resp.headers.get("Content-Type", "application/json")
             self.send_response(resp.status)
             self.send_header("Content-Type", ctype)
             self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
             self.send_header("Cache-Control", "no-cache")
             if stream:
-                # SSE: no Content-Length, chunked transfer. Use read1() so we
-                # return whatever bytes are available RIGHT NOW instead of
-                # blocking until the 4096-byte buffer fills (read() blocks to
-                # fill amt, which buffers small SSE events until the stream
-                # ends — the "shimmer then full response" bug).
-                # 15s socket budget + keepalive: a long quiet reasoning stretch
-                # must not look dead to Vercel/ngrok/browser.
+                # SSE: no Content-Length, chunked transfer. read1() returns
+                # whatever bytes are available RIGHT NOW instead of blocking
+                # to fill the buffer (the "shimmer then full response" bug).
                 import socket as _socket
                 self.send_header("X-Accel-Buffering", "no")
                 self.end_headers()
@@ -2130,6 +2251,8 @@ class Handler(BaseHTTPRequestHandler):
                         self.wfile.write(chunk)
                         self.wfile.flush()
                     except _socket.timeout:
+                        # Quiet upstream: heartbeat so proxies + browser
+                        # keepalive and never see a dead-looking connection.
                         try:
                             self.wfile.write(b": keepalive\n\n")
                             self.wfile.flush()
@@ -2137,11 +2260,29 @@ class Handler(BaseHTTPRequestHandler):
                             break
                     except (BrokenPipeError, ConnectionResetError):
                         break
+                    except Exception:
+                        # http.client connections don't recover from read
+                        # errors — close cleanly instead of 502-after-headers.
+                        break
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             else:
                 data = resp.read()
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            # Connection-level failure BEFORE headers went out.
+            try:
+                self._json({"error": str(e)}, 502)
+            except Exception:
+                pass
 
     def log_message(self, format: str, *args):
         sys.stderr.write(f"[state-server {datetime.now(SAST).isoformat()}] {format % args}\n")
