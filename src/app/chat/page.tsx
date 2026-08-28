@@ -63,6 +63,11 @@ type ModuleLiveState = {
 
 const moduleLive: Record<string, ModuleLiveState> = {};
 const lastSeqState: Record<string, number> = {};
+// Last completed run's per-reply usage per session (from run.completed).
+// The DB does NOT persist per-message input/output — only the live SSE
+// carries it — so the last reply's numbers are cached here and re-applied
+// when a history reload rebuilds the final bubble.
+const moduleLastUsage: Record<string, { input_tokens?: number; output_tokens?: number; model?: string } | undefined> = {};
 // Set when the final assistant message has been appended to the message list
 // (assistant.completed). renderLiveContent reads this to stop rendering the
 // live bubble — otherwise the same reasoning + content shows twice (final
@@ -746,7 +751,18 @@ export default function ChatPage() {
       // Tool results keyed by tool_call_id so we can attach them to the
       // assistant's tool_calls and rebuild the full chain.
       const toolResults = new Map<string, { result: string; error: boolean }>();
+      // Index of the last assistant row in `list` — only that row carries the
+      // cached per-reply usage (moduleLastUsage).
+      const lastAssistantIdx = (() => {
+        for (let i = list.length - 1; i >= 0; i--) {
+          if (list[i]?.role === "assistant") return i;
+        }
+        return -1;
+      })();
+      let rowIdx = -1;
       for (const m of list) {
+        rowIdx += 1;
+        const isLastAssistantRow = rowIdx === lastAssistantIdx;
         if (m.role === "tool") {
           const callId = m.tool_call_id;
           if (callId) {
@@ -808,11 +824,17 @@ export default function ChatPage() {
           toolCalls,
           // Per-message stats: the persisted row's token_count + the session
           // model (from the session list) — shown at the end of the bubble.
+          // The LAST assistant row also gets the cached per-reply usage
+          // (in/out from that turn's run.completed) — the DB doesn't store
+          // per-message usage, so the live capture is the only source.
           stats:
             m.role === "assistant"
               ? {
                   model: modelName,
                   tokens: typeof m.token_count === "number" ? m.token_count : undefined,
+                  ...(isLastAssistantRow
+                    ? moduleLastUsage[id] ?? {}
+                    : {}),
                 }
               : null,
         };
@@ -2071,6 +2093,15 @@ export default function ChatPage() {
                 runUsage = (payload as any).usage ?? null;
                 runRuntime = (payload as any).runtime ?? runRuntime;
                 completedCleanly = true;
+                // Cache per-reply usage so history reloads re-apply it to the
+                // final bubble (the DB doesn't persist per-message usage).
+                if (sessionId && runUsage) {
+                  moduleLastUsage[sessionId] = {
+                    input_tokens: runUsage.input_tokens,
+                    output_tokens: runUsage.output_tokens,
+                    model: runRuntime?.model,
+                  };
+                }
                 dbg("sse", `run.completed usage=${JSON.stringify(runUsage)?.slice(0, 120)}`, { sessionId, toolCount, failedCount, assistantAppended });
                 const completedAt = Date.now();
                 // Settle any tool still showing a spinner — a clean
