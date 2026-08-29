@@ -6,12 +6,12 @@
 //
 // Discord-style structured entry: commands with known arguments get a
 // step-by-step picker instead of free typing, so a broken/partial command
-// can't be sent. /model walks provider → model; enum commands (/reasoning,
+// can't be sent. /model walks provider → model, enum commands (/reasoning,
 // /fast, /approvals, /voice, /yolo…) show option chips; free-text commands
 // (/steer, /queue, /title…) show a hint row and only complete on real input.
 
-import { useState } from "react";
-import { ChevronRight, Check } from "lucide-react";
+import { useState, useEffect } from "react";
+import { ChevronRight, Check, RefreshCw } from "lucide-react";
 
 export type SlashItem = {
   name: string;
@@ -94,44 +94,75 @@ const ARG_OPTIONS: Record<string, string[]> = {
   insights: ["7", "30"],
 };
 
-// /model walks two steps: provider → concrete model. Curated per-provider
-// lists (matches what's actually wired in ~/.hermes/config.yaml).
-const MODEL_PROVIDERS: { id: string; label: string; note: string; models: string[] }[] = [
-  {
-    id: "ollama-cloud",
-    label: "Ollama Cloud",
-    note: "ollama.com/v1",
-    models: [
-      "deepseek-v4-flash:0731",
-      "deepseek-v4-pro:0813",
-      "gemma4:31b",
-      "gpt-oss:20b",
-      "kimi-k2.7-code",
-      "minimax-m2.7",
-      "glm-5.1",
-    ],
-  },
-  {
-    id: "openrouter",
-    label: "OpenRouter",
-    note: "openrouter.ai — includes profiles like stealth/ox-alpha",
-    models: ["stealth/ox-alpha", "gpt-5.6-sol", "gpt-5.6-luna", "minimax-m3"],
-  },
-  {
-    id: "google",
-    label: "Google Gemini",
-    note: "free tier — tight rate limits",
-    models: ["gemini-2.5-flash", "gemini-2.5-pro"],
-  },
-];
+// ── Dynamic model inventory (from Hermes /api/model/options) ─────────
+// Shape comes from hermes_cli/inventory.py build_models_payload.
+
+type InvModel = {
+  model?: string;
+  id?: string;
+  name?: string;
+};
+
+type InvProvider = {
+  slug?: string;
+  name?: string;
+  model?: string;      // current model on this provider
+  models?: (string | InvModel)[];
+  is_current?: boolean;
+  configured?: boolean;
+};
+
+export type ModelInventory = {
+  providers: InvProvider[];
+  loadedAt: number | null;
+  loading: boolean;
+  error: string | null;
+  reload: (refresh?: boolean) => void;
+};
+
+// Module-level hand-off from the /model wizard to the page's /model
+// executor: which provider the user last picked. The wizard writes it here
+// when a model row is chosen; the page's /model command handler reads it
+// and sends `provider` alongside `model` so the gateway routes
+// non-aliased (raw_request) models to the right provider.
+export const lastModelPick: { providerSlug?: string; providerName?: string } = {};
+
+export function useModelInventory(): ModelInventory {
+  const [providers, setProviders] = useState<InvProvider[]>([]);
+  const [loadedAt, setLoadedAt] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = (refresh = false) => {
+    setLoading(true);
+    setError(null);
+    fetch(`/api/chat/models${refresh ? "?refresh=1" : ""}`, { cache: "no-store" })
+      .then((r) => r.json())
+      .then((data) => {
+        const provs: InvProvider[] = Array.isArray(data?.providers) ? data.providers : [];
+        // Only providers that actually have models to pick from.
+        setProviders(provs.filter((p) => (p.models?.length ?? 0) > 0));
+        setLoadedAt(Date.now());
+      })
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false));
+  };
+
+  return { providers, loadedAt, loading, error, reload: load };
+}
+
+function modelId(m: string | InvModel): string {
+  if (typeof m === "string") return m;
+  return m.model ?? m.id ?? m.name ?? "";
+}
 
 type Panel =
   | { kind: "none" }
   | { kind: "options"; cmd: string; options: string[] }
   | { kind: "text-hint"; cmd: string; argHint: string }
-  | { kind: "model-provider" };
+  | { kind: "model-provider"; inv: ModelInventory };
 
-function panelFor(input: string): Panel {
+function panelFor(input: string, inv: ModelInventory): Panel {
   // Bare or trailing-space "/cmd" → structured panel for that command.
   const m = input.match(/^\/([a-z-]+)(\s?)(.*)$/i);
   if (!m) return { kind: "none" };
@@ -142,7 +173,7 @@ function panelFor(input: string): Panel {
   // except for /model where the wizard owns the whole flow.
   if (rest.trim().length > 0) return { kind: "none" };
 
-  if (cmd.name === "model") return { kind: "model-provider" };
+  if (cmd.name === "model") return { kind: "model-provider", inv };
   if (ARG_OPTIONS[cmd.name]) return { kind: "options", cmd: cmd.name, options: ARG_OPTIONS[cmd.name] };
   return { kind: "text-hint", cmd: cmd.name, argHint: cmd.arg };
 }
@@ -175,13 +206,23 @@ export function SlashAutocomplete({
   // Wizard position within the /model flow survives while the panel stays
   // mounted (input still starts with "/model "). Reset when leaving /model.
   const [modelStep, setModelStep] = useState<number | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<InvProvider | null>(null);
+  const inv = useModelInventory();
+  // Fetch inventory when the /model wizard first opens.
+  useEffect(() => {
+    if (/^\/model\s?$/.test(input) && inv.providers.length === 0 && !inv.loading && inv.loadedAt === null) {
+      inv.reload();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [input]);
+
   const startsModel = /^\/model\s?$/.test(input);
 
   if (!input.startsWith("/") || input.length < 1) return null;
 
   // ── Command-name phase: filter the registry as the user types ──
   const bareQuery = input.slice(1).toLowerCase();
-  const structured = panelFor(input);
+  const structured = panelFor(input, inv);
 
   if (structured.kind === "none" && !bareQuery.includes(" ")) {
     const items = SLASH_COMMANDS.filter(
@@ -232,46 +273,99 @@ export function SlashAutocomplete({
 
   // ── /model wizard ──
   if (structured.kind === "model-provider") {
-    if (!startsModel && modelStep !== null) setModelStep(null);
+    if (!startsModel && modelStep !== null) {
+      setModelStep(null);
+      setSelectedProvider(null);
+    }
     const step = startsModel ? modelStep : null;
-    if (step === null || step >= MODEL_PROVIDERS.length) {
+
+    // Step 2: models for the selected provider
+    if (step !== null && selectedProvider) {
+      const models = (selectedProvider.models ?? []).map(modelId).filter(Boolean);
       return shell(
-        MODEL_PROVIDERS.map((p, i) => (
+        <>
           <Row
-            key={p.id}
             onClick={() => {
-              setModelStep(i);
+              setModelStep(null);
+              setSelectedProvider(null);
               onApply("/model ");
             }}
           >
-            <span className="font-semibold" style={{ color: "var(--accent)" }}>{p.label}</span>
-            <span className="ml-auto truncate text-xs" style={{ color: "var(--text-faint)" }}>{p.note}</span>
-            <ChevronRight className="h-3.5 w-3.5 shrink-0 opacity-50" />
+            <span className="text-xs" style={{ color: "var(--text-faint)" }}>← Back to providers</span>
           </Row>
-        )),
-        "/model — pick a provider"
+          {models.map((mName) => (
+            <Row key={mName} onClick={() => {
+              lastModelPick.providerSlug = selectedProvider.slug;
+              lastModelPick.providerName = selectedProvider.name ?? selectedProvider.slug;
+              onApply(`/model ${mName}`);
+            }}>
+              <Check className="h-3.5 w-3.5 shrink-0 opacity-0" />
+              <span className="font-mono text-xs">{mName}</span>
+              <span className="ml-auto text-[10px]" style={{ color: "var(--text-faint)" }}>
+                {selectedProvider.name ?? selectedProvider.slug}
+                {selectedProvider.model === mName ? " · current" : ""}
+              </span>
+            </Row>
+          ))}
+        </>,
+        `/model — ${selectedProvider.name ?? selectedProvider.slug}`
       );
     }
-    const p = MODEL_PROVIDERS[step];
+
+    // Step 1: provider list from live inventory
+    const providers = inv.providers;
     return shell(
       <>
-        <Row
-          onClick={() => {
-            setModelStep(null);
-            onApply("/model ");
-          }}
-        >
-          <span className="text-xs" style={{ color: "var(--text-faint)" }}>← Back to providers</span>
-        </Row>
-        {p.models.map((mName) => (
-          <Row key={mName} onClick={() => onApply(`/model ${mName}`)}>
-            <Check className="h-3.5 w-3.5 shrink-0 opacity-0" />
-            <span className="font-mono text-xs">{mName}</span>
-            <span className="ml-auto text-[10px]" style={{ color: "var(--text-faint)" }}>{p.label}</span>
+        {providers.length > 0 && (
+          <Row
+            onClick={() => inv.reload(true)}
+          >
+            <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${inv.loading ? "animate-spin" : ""}`} style={{ color: "var(--text-faint)" }} />
+            <span className="text-xs" style={{ color: "var(--text-faint)" }}>
+              {inv.loading ? "Refreshing live catalogs…" : "Refresh live provider catalogs"}
+            </span>
+          </Row>
+        )}
+        {inv.loading && providers.length === 0 && (
+          <div className="px-3 py-3 text-xs" style={{ color: "var(--text-faint)" }}>
+            Loading providers…
+          </div>
+        )}
+        {inv.error && (
+          <div className="px-3 py-3 text-xs" style={{ color: "var(--text-faint)" }}>
+            Could not load model inventory — {inv.error.slice(0, 80)}
+          </div>
+        )}
+        {!inv.loading && !inv.error && providers.length === 0 && (
+          <div className="px-3 py-3 text-xs" style={{ color: "var(--text-faint)" }}>
+            No configured providers found — add a key in Hermes config first.
+          </div>
+        )}
+        {providers.map((p) => (
+          <Row
+            key={p.slug ?? p.name}
+            onClick={() => {
+              setSelectedProvider(p);
+              setModelStep(1);
+              onApply("/model ");
+            }}
+          >
+            <span className="font-semibold" style={{ color: "var(--accent)" }}>
+              {p.name ?? p.slug}
+            </span>
+            {p.is_current && (
+              <span className="rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase" style={{ background: "var(--accent)", color: "var(--bg)" }}>
+                active
+              </span>
+            )}
+            <span className="ml-auto truncate text-xs" style={{ color: "var(--text-faint)" }}>
+              {p.models?.length ?? 0} models
+            </span>
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 opacity-50" />
           </Row>
         ))}
       </>,
-      `/model — ${p.label}`
+      "/model — live provider inventory"
     );
   }
 
