@@ -18,6 +18,7 @@ import { BrowserView } from "@/components/chat/BrowserView";
 import { ChainView } from "@/components/chat/ChainView";
 import { ToolCallStack } from "@/components/chat/ToolCalls";
 import { DEFAULT_MODEL as MODEL } from "@/lib/models";
+import { lastModelPick } from "@/components/chat/SlashAutocomplete";
 import { mintStreamTicket, directStreamUrl, directStreamHeaders } from "@/lib/direct-stream";
 import { dbg, toolSnap, liveSnap } from "@/lib/chat-debug";
 import { watchRunCompletion } from "@/lib/push";
@@ -1237,7 +1238,22 @@ export default function ChatPage() {
             const res = await fetch(`/api/chat/sessions/${activeId}/model`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ model: arg, require_model_lock: false }),
+              body: JSON.stringify(
+                {
+                  model: arg,
+                  require_model_lock: false,
+                  // Track the provider the user picked in the wizard (when
+                  // they picked from the dynamic list) so the gateway builds
+                  // the correct provider route for non-aliased models.
+                  ...(lastModelPick.providerSlug
+                    ? { provider: lastModelPick.providerSlug }
+                    : {}),
+                  // "ultra" effort maps to high; explicit string passthrough.
+                  ...(arg.toLowerCase().includes("ultra")
+                    ? { model_options: { reasoning: { enabled: true, effort: "high" } } }
+                    : {}),
+                },
+              ),
             });
             const data = await res.json();
             if (!res.ok) throw new Error(data?.error?.message ?? `model lock failed (${res.status})`);
@@ -1903,6 +1919,21 @@ export default function ChatPage() {
                 }
                 break;
               }
+              case "reasoning.delta": {
+                // Live thinking stream (per-delta reasoning from the model,
+                // wired through the gateway's reasoning_callback 2026-08-29).
+                const rdelta = (payload as any).delta ?? "";
+                if (rdelta) {
+                  reasoning += rdelta;
+                  chain = appendReasoningToChain(chain, rdelta);
+                  bumpLive({
+                    reasoning,
+                    chain,
+                    phase: currentLive.phase === "initializing" ? "thinking" : currentLive.phase,
+                  });
+                }
+                break;
+              }
               case "tool.progress": {
                 const tname = (payload as any).tool_name ?? "_thinking";
                 const delta = (payload as any).delta ?? "";
@@ -2516,6 +2547,19 @@ export default function ChatPage() {
               m.streamedText = text;
               commitReattachLive((p) => ({ ...p, phase: "streaming" as const }));
               if (activeIdRef.current === sessionId) setStreamedText(text);
+            } else if (payload.event === "reasoning.delta") {
+              // Live thinking frames on the reattach stream (gateway
+              // reasoning_callback, 2026-08-29) — same accumulation as the
+              // _thinking tool.progress path below.
+              livePhase = true;
+              const rdelta = (payload as any).delta ?? "";
+              if (rdelta) {
+                commitReattachLive((p) => ({
+                  ...p,
+                  reasoning: p.reasoning + rdelta,
+                  chain: appendReasoningToChain(p.chain, rdelta),
+                }));
+              }
             } else if (payload.event === "tool.started" || payload.event === "tool.progress") {
               livePhase = true;
               const tname = payload.tool_name ?? "tool";

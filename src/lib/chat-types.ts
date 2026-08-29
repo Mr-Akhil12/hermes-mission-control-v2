@@ -96,6 +96,7 @@ export type StreamEvent =
   | { event: "run.started"; run_id?: string; runtime?: RunRuntime }
   | { event: "message.started"; message?: { id?: string } }
   | { event: "assistant.delta"; delta?: string }
+  | { event: "reasoning.delta"; delta?: string }
   | {
       event: "tool.progress";
       tool_name?: string;

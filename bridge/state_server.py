@@ -19,6 +19,7 @@ import asyncio
 import json
 import os
 import queue
+import re
 import sqlite3
 import subprocess
 import sys
@@ -169,6 +170,53 @@ def load_cron_output(job_id: str, filename: str | None = None) -> dict:
 # are single-use (replay-safe: a stolen ticket is dead after first use).
 STREAM_TICKETS_FILE = HERMES / "stream_tickets.json"
 STREAM_TICKET_TTL = 120
+# Active run registry: session_id -> run_id, maintained by the chat-stream
+# proxy (set on run.start, cleared on stream close). Powers cross-device
+# reattach: a NEW device opens the PWA, /events sees the live run_id and
+# tails the REAL upstream /v1/runs/{run_id}/events instead of 404ing.
+ACTIVE_RUNS_FILE = HERMES / "active_runs.json"
+_ACTIVE_RUNS_LOCK = __import__("threading").Lock()
+
+
+def _load_active_runs() -> dict:
+    try:
+        return json.loads(ACTIVE_RUNS_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _save_active_runs(runs: dict) -> None:
+    try:
+        ACTIVE_RUNS_FILE.write_text(json.dumps(runs, indent=1))
+    except Exception:
+        pass
+
+
+def _set_active_run(session_id: str, run_id: str) -> None:
+    with _ACTIVE_RUNS_LOCK:
+        runs = _load_active_runs()
+        runs[session_id] = {"run_id": run_id, "started": int(time.time())}
+        # Drop entries older than 30 min (no run legitimately lives that long)
+        now = int(time.time())
+        runs = {k: v for k, v in runs.items() if now - int(v.get("started", 0)) < 1800}
+        _save_active_runs(runs)
+
+
+def _clear_active_run(session_id: str) -> None:
+    with _ACTIVE_RUNS_LOCK:
+        runs = _load_active_runs()
+        if runs.pop(session_id, None) is not None:
+            _save_active_runs(runs)
+
+
+def _get_active_run(session_id: str) -> str | None:
+    runs = _load_active_runs()
+    entry = runs.get(session_id)
+    if not entry:
+        return None
+    if int(time.time()) - int(entry.get("started", 0)) >= 1800:
+        return None
+    return entry.get("run_id")
 
 
 def _ticket_key() -> str:
@@ -933,6 +981,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"enabled": push.available(), "subscriptions": len(push._load_subs())})
             elif path == "/v1/models":
                 self._proxy_api_get(path)
+            elif path == "/api/model/options":
+                self._proxy_api_get(path)
             elif path == "/api/browser/shot":
                 self._browser_shot()
                 return
@@ -944,27 +994,54 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(e)}, 500)
 
     def _proxy_api_get_stream(self, path: str) -> None:
-        """Forward a GET to the Hermes API (:8642) with chunked SSE streaming
-        (used by /api/sessions/{id}/events reattach).
+        """Forward a GET to the Hermes API (:8642) with chunked SSE streaming.
 
-        Uses a short socket timeout so quiet reasoning stretches (no bytes for
-        a while) never kill the reattach stream: on every socket timeout we
-        write an SSE keepalive comment frame — which keeps Vercel/ngrok and
-        the browser's fetch from idling out — then keep reading. The stream
-        only ends when the upstream actually closes.
+        Used by /api/sessions/{id}/events reattach. Cross-device live view:
+        this endpoint never existed upstream (404), so a NEW device could
+        never attach to a run started elsewhere. Now: if the session has an
+        ACTIVE run (registered by the chat-stream proxy via the run.started
+        frame), tail the REAL upstream /v1/runs/{run_id}/events — same event
+        frames as the original stream. If there's no active run, answer an
+        immediate terminal SSE frame so the client settles instead of
+        polling a 404 forever.
         """
         import socket as _socket
         import urllib.request as u
+
+        # path = /api/sessions/{session_id}/events?since=N
+        parts = path.split("/")
+        session_id = parts[3] if len(parts) > 3 else ""
+        run_id = _get_active_run(session_id)
+
+        if not run_id:
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache, no-transform")
+                self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
+                self.end_headers()
+                err = json.dumps({"event": "done", "reason": "no live run"})
+                self.wfile.write(f"data: {err}\n\n".encode())
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+
         api = os.environ.get("HERMES_API_URL", "http://127.0.0.1:8642")
         api_key = os.environ.get("API_SERVER_KEY", "")
         headers = {}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        req = u.Request(f"{api}{self.path}", headers=headers)
+        req = u.Request(f"{api}/v1/runs/{run_id}/events", headers=headers)
         try:
-            # 15s socket read budget: long enough to not spam, short enough
-            # that a healthy upstream that is quiet >15s gets a keepalive.
-            with u.urlopen(req, timeout=15) as resp:
+            # 45s socket read budget. CRITICAL (2026-08-28): with 15s this died
+            # at exactly T+15s during quiet reasoning stretches — after ONE
+            # socket timeout the urllib response is poisoned ("cannot read
+            # from timed out object") and every later read raises. Upstream
+            # sends ": keepalive" every 30s while a run is alive, so 45s only
+            # ever fires when the upstream is truly gone.
+            with u.urlopen(req, timeout=45) as resp:
+                # 404 => the run just ended upstream; settle the client.
                 self.send_response(resp.status)
                 ctype = resp.headers.get("Content-Type", "text/event-stream")
                 self.send_header("Content-Type", ctype)
@@ -974,17 +1051,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 while True:
                     try:
-                        # read1() returns whatever bytes are available RIGHT
-                        # NOW instead of blocking to fill 4096 — sparse SSE
-                        # frames (reasoning deltas, tool.completed) flush to
-                        # the client immediately instead of buffering up to
-                        # the 15s socket budget. Same fix as the chat-stream
-                        # path (line ~1365).
                         chunk = resp.read1(4096)
                         if not chunk:
                             break
                         self.wfile.write(chunk)
                         self.wfile.flush()
+                        if b"event: run.completed" in chunk or b"event: done" in chunk:
+                            _clear_active_run(session_id)
                     except _socket.timeout:
                         # Quiet upstream: heartbeat so proxies + browser
                         # keepalive and never see a dead-looking connection.
@@ -996,20 +1069,25 @@ class Handler(BaseHTTPRequestHandler):
                     except (BrokenPipeError, ConnectionResetError):
                         break
         except Exception as e:
-            # Upstream failure (404 = no such session/endpoint, 5xx, connect
-            # error): answer as an SSE terminal error frame, NOT a JSON 502.
-            # The PWA's reattach loop reads SSE — a JSON 502 makes it retry
-            # forever (2026-08-28: /events 502 every ~2s, eternal shimmer).
-            # event:error is a terminal frame client-side, so the UI stops
-            # polling and settles. HTTP status stays 200 so the reader runs.
+            # Run ended upstream (404/410) or connection error: settle with a
+            # terminal frame, NOT a JSON 502 (the client's loop reads SSE).
+            try:
+                with open(r"C:/Users/pilla/AppData/Local/hermes/logs/attach-events-debug.log", "a") as _f:
+                    _f.write(f"{time.strftime('%H:%M:%S')} attach-fail run={run_id[:20]} err={type(e).__name__}: {e}\n")
+            except Exception:
+                pass
+            try:
+                _clear_active_run(session_id)
+            except Exception:
+                pass
             try:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache, no-transform")
                 self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
                 self.end_headers()
-                err = json.dumps({"error": str(e), "terminal": True})
-                self.wfile.write(f"event: error\ndata: {err}\n\n".encode())
+                err = json.dumps({"event": "done", "reason": "run ended"})
+                self.wfile.write(f"data: {err}\n\n".encode())
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 pass
@@ -1037,11 +1115,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(e)}, 502)
 
     def _session_control(self, action: str, session_id: str, arg: str = "") -> dict:
-        """Call a session-scoped control endpoint on the Hermes API (:8642).
+        """Control the session's LIVE run on the Hermes API (:8642).
 
-        These hit the API server's /api/sessions/{id}/steer|stop|goal routes,
-        which operate on the ACTUAL conversation's live agent — never the
-        ws_bridge's throwaway tui_gateway session.
+        2026-08-29: the session-scoped routes (/api/sessions/{id}/steer) never
+        existed upstream — every steer returned {"error": "HTTP Error 404"}.
+        The real endpoints are run-scoped: /v1/runs/{run_id}/steer|stop.
+        Resolve the session's active run_id from active_runs.json (maintained
+        by the chat-stream proxy) and target that; fall back to no_active_run.
         """
         import urllib.request as u
         import json as _json
@@ -1050,6 +1130,10 @@ class Handler(BaseHTTPRequestHandler):
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
+
+        run_id = _get_active_run(session_id)
+        if not run_id:
+            return {"ok": False, "status": "no_active_run"}
         if action == "steer":
             body = _json.dumps({"text": arg}).encode()
         elif action == "stop":
@@ -1059,7 +1143,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             return {"ok": False, "error": f"unknown action {action}"}
         req = u.Request(
-            f"{api}/api/sessions/{session_id}/{action}",
+            f"{api}/v1/runs/{run_id}/{action}",
             data=body,
             headers=headers,
             method="POST",
@@ -1067,12 +1151,20 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with u.urlopen(req, timeout=20) as resp:
                 data = _json.loads(resp.read() or b"{}")
-            return data
+            # Map run-scoped responses onto the statuses _session_steer/_stop expect.
+            if action == "steer" and data.get("accepted"):
+                return {"status": "queued"}
+            if action == "stop" and (data.get("interrupted") or data.get("status") == "interrupted"):
+                return {"status": "interrupted"}
+            return {"ok": True, **data}
         except u.HTTPError as e:
             try:
                 err_data = _json.loads(e.read() or b"{}")
             except Exception:
                 err_data = {}
+            code = err_data.get("error", {}).get("code", "") if isinstance(err_data.get("error"), dict) else ""
+            if action == "steer" and (code == "run_not_accepting_steer" or e.code in (409, 404)):
+                return {"ok": False, "status": "no_active_run"}
             return {"ok": False, "error": str(e), **err_data}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -2240,7 +2332,15 @@ class Handler(BaseHTTPRequestHandler):
                 # SSE: no Content-Length, chunked transfer. read1() returns
                 # whatever bytes are available RIGHT NOW instead of blocking
                 # to fill the buffer (the "shimmer then full response" bug).
+                # Also: track session -> run_id in active_runs.json so a NEW
+                # device can reattach via /api/sessions/{id}/events (which
+                # tails the real /v1/runs/{run_id}/events upstream).
                 import socket as _socket
+
+                # session_id from path: /api/sessions/{id}/chat/stream
+                path_parts = path.split("/")
+                session_for_run = path_parts[3] if len(path_parts) > 3 else ""
+                seen_done = False
                 self.send_header("X-Accel-Buffering", "no")
                 self.end_headers()
                 while True:
@@ -2250,6 +2350,14 @@ class Handler(BaseHTTPRequestHandler):
                             break
                         self.wfile.write(chunk)
                         self.wfile.flush()
+                        if session_for_run:
+                            # run.started frame carries "run_id": "run_..."
+                            m = re.search(rb'"run_id":\s*"(run_[0-9a-f]+)"', chunk)
+                            if m:
+                                _set_active_run(session_for_run, m.group(1).decode())
+                            if b"event: run.completed" in chunk or b"event: done" in chunk:
+                                _clear_active_run(session_for_run)
+                                seen_done = True
                     except _socket.timeout:
                         # Quiet upstream: heartbeat so proxies + browser
                         # keepalive and never see a dead-looking connection.
