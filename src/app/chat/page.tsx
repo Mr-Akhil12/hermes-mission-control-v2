@@ -418,6 +418,11 @@ export default function ChatPage() {
   const [titleDraft, setTitleDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesViewportRef = useRef<HTMLDivElement>(null);
+  // Keeps the transcript pinned to the newest message even when layout
+  // finishes LATE (markdown/code/font reflow after the commit) — the
+  // double-rAF pin alone loses that race on big transcripts and the PWA
+  // opens at the top (2026-08-29).
+  const viewportObserverRef = useRef<MutationObserver | null>(null);
   const followLatestRef = useRef(true);
   const recognitionRef = useRef<any>(null);
   const streamAbort = useRef<AbortController | null>(null);
@@ -1055,12 +1060,28 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
-    if (!settings.autoScroll || !followLatestRef.current) return;
-    const frame = requestAnimationFrame(() => {
-      const viewport = messagesViewportRef.current;
-      if (viewport) viewport.scrollTop = viewport.scrollHeight;
-    });
-    return () => cancelAnimationFrame(frame);
+    const viewport = messagesViewportRef.current;
+    if (!viewport) return;
+    const pinNow = () => {
+      if (!settings.autoScroll || !followLatestRef.current) return;
+      viewport.scrollTop = viewport.scrollHeight;
+    };
+    // (a) React-state-driven pin (existing behaviour).
+    let frame = 0;
+    if (settings.autoScroll && followLatestRef.current) {
+      frame = requestAnimationFrame(pinNow);
+    }
+    // (b) Layout-driven pin: late reflow (fonts, code fences, images) grows
+    // the transcript AFTER React's commit; observe and re-pin so the newest
+    // message stays on screen regardless of what triggered the growth.
+    const observer = new MutationObserver(() => requestAnimationFrame(pinNow));
+    observer.observe(viewport, { childList: true, subtree: true, characterData: true });
+    viewportObserverRef.current = observer;
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      viewportObserverRef.current = null;
+    };
   }, [messages, busy, live, streamedText, settings.autoScroll]);
 
   // Keep the reasoning stream pinned to the bottom as it grows — the box is
