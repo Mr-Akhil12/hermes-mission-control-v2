@@ -17,7 +17,7 @@ export const MarkdownLite = memo(function MarkdownLite({
   text: string;
   tone?: "user" | "assistant";
 }) {
-  const parts = text.split(/(```[\s\S]*?```|`[^`\n]+`|\*\*[^*]+\*\*|\*[^*\n]+\*|\[[^\]]+\]\([^)]+\))/g);
+  const parts = text.split(/(```[\s\S]*?```|`[^`\n]+`|\*\*[^*]+\*\*|\*[^*\n]+\*|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s<>]+)/g);
 
   return (
     <>
@@ -74,6 +74,20 @@ export const MarkdownLite = memo(function MarkdownLite({
               style={{ color: tone === "user" ? "rgba(255,255,255,0.95)" : "var(--accent-2)" }}
             >
               {link[1]}
+            </a>
+          );
+        }
+        if (/^https?:\/\//.test(part)) {
+          return (
+            <a
+              key={i}
+              href={part}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="break-all underline underline-offset-2"
+              style={{ color: tone === "user" ? "rgba(255,255,255,0.95)" : "var(--accent-2)" }}
+            >
+              {part.length > 60 ? part.slice(0, 57) + "…" : part}
             </a>
           );
         }
