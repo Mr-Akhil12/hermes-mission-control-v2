@@ -979,6 +979,19 @@ export default function ChatPage() {
         assistantMsgs: msgs.filter((m) => m.role === "assistant").length,
         toolMsgs: msgs.filter((m) => m.role === "assistant" && (m.toolCalls?.length ?? 0) > 0).length,
       });
+      // 2026-09-01 FIX (queue loss): restore a queued message that survived a
+      // crash/reload while the page was away. Only when the page believes
+      // it's NOT busy (nothing will flush the in-memory queue).
+      try {
+        const qKey = `hermes-chat-queue-${id}`;
+        const persisted: string[] = JSON.parse(window.localStorage.getItem(qKey) ?? "[]");
+        if (persisted.length && !busyRef.current && pendingQueue.current.length === 0) {
+          pendingQueue.current.push(...persisted);
+          dbg("loadMessages", `restored ${persisted.length} queued message(s) from localStorage`, { sessionId: id });
+        }
+      } catch {
+        /* ignore */
+      }
       return msgs;
     } catch (e) {
       dbg("loadMessages", `FAILED ${e instanceof Error ? e.message : e}`, { sessionId: id });
@@ -1475,7 +1488,19 @@ export default function ChatPage() {
             setMessages((m) => [...m, { role: "system", content: "Usage: `/queue <message>` — sends after the current run finishes." }]);
             return true;
           }
+          // 2026-09-01 FIX (queue loss): the queue was a plain in-memory ref —
+          // a crash/reload/abort between /queue and the run finishing LOST the
+          // text (this bit Akhil on 1 Sep 17:0x). Now mirrored to localStorage
+          // per-session and restored on load; cleared only on actual flush.
           pendingQueue.current.push(arg);
+          try {
+            const qKey = `hermes-chat-queue-${activeId ?? "new"}`;
+            const existing: string[] = JSON.parse(window.localStorage.getItem(qKey) ?? "[]");
+            existing.push(arg);
+            window.localStorage.setItem(qKey, JSON.stringify(existing));
+          } catch {
+            // quota/private mode: in-memory queue still works for this page's lifetime
+          }
           setMessages((m) => [...m, { role: "user", content: arg }, { role: "system", content: "⏳ Queued — I'll pick this up after the current run finishes." }]);
           return true;
         }
@@ -1598,11 +1623,11 @@ export default function ChatPage() {
       if (busyRef.current) {
         if (sessionId) draftsRef.current[sessionId] = "";
         setInput("");
-        setMessages((m) => [
-          ...m,
-          { role: "user", content: trimmed },
-          { role: "system", content: "⏩ Steered — I'll fold this in after the current tool call." },
-        ]);
+        // 2026-09-01 FIX (silent steer loss): the ack used to be pushed
+        // BEFORE the fetch and failures were filtered out — a 409-bounced
+        // steer rendered as "⏩ Steered". The ack now comes ONLY from the
+        // server's actual response.
+        let steerAck = "";
         try {
           const res = await fetch("/api/chat/command", {
             method: "POST",
@@ -1610,12 +1635,18 @@ export default function ChatPage() {
             body: JSON.stringify({ command: `/steer ${trimmed}`, session_id: sessionId }),
           });
           const data = await res.json();
-          if (data?.output && !data.output.includes("No live agent")) {
-            setMessages((m) => [...m, { role: "system", content: data.output }]);
-          }
+          steerAck =
+            data?.output ??
+            data?.error ??
+            "⚠️ Steer could not be delivered — the run may have just finished. Send it as a normal message.";
         } catch {
-          // Steer failed silently — the run continues; the user can /stop or /queue.
+          steerAck = "⚠️ Steer failed to send (network). Send it as a normal message instead.";
         }
+        setMessages((m) => [
+          ...m,
+          { role: "user", content: trimmed },
+          { role: "system", content: steerAck },
+        ]);
         return;
       }
 
@@ -2343,6 +2374,13 @@ export default function ChatPage() {
           // A queued turn must not launch merely because the viewer detached.
           busyRef.current = false;
           const queued = pendingQueue.current.splice(0);
+          // 2026-09-01 FIX (queue loss): clear the localStorage mirror only
+          // when the queue actually flushes.
+          try {
+            if (queued.length) window.localStorage.removeItem(`hermes-chat-queue-${sessionId ?? "new"}`);
+          } catch {
+            /* ignore */
+          }
           for (const q of queued) {
             if (stillViewing) {
               setMessages((current) => current.filter((message) => !(message.role === "system" && message.content.includes("Queued — waiting"))));

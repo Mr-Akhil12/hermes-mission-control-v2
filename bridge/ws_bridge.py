@@ -23,9 +23,13 @@ from pathlib import Path
 
 log = logging.getLogger("ws_bridge")
 
-DASH = os.environ.get("DASHBOARD_URL", "http://127.0.0.1:9119")
-WS_URL = os.environ.get("DASHBOARD_WS_URL", "ws://127.0.0.1:9119/api/ws")
-CONFIG = Path(os.path.expanduser("~/.hermes/config.yaml"))
+DASH = os.environ.get("DASHBOARD_URL", "http://127.0.0.1:19119")
+WS_URL = os.environ.get("DASHBOARD_WS_URL", "ws://127.0.0.1:19119/api/ws")
+# 2026-09-01 FIX: was expanduser("~/.hermes/config.yaml") — the stale June-era
+# WSL-migration copy. Read the LIVE config so basic-auth creds are current.
+CONFIG = Path(
+    os.environ.get("HERMES_HOME", str(Path.home() / "AppData" / "Local" / "hermes"))
+) / "config.yaml"
 
 # Read basic-auth credentials from config.yaml (dashboard.basic_auth).
 def _basic_creds() -> tuple[str, str]:

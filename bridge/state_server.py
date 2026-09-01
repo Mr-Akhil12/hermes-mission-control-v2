@@ -219,6 +219,40 @@ def _get_active_run(session_id: str) -> str | None:
     return entry.get("run_id")
 
 
+def _get_active_run_by_any_key(session_id: str) -> str | None:
+    """Resolve a run id for a session that isn't a direct key in
+    active_runs.json. Handles the dashboard's visible session id
+    (2026…/2026…) vs the lineage root key (api_*) that the chat-stream
+    proxy writes. Resolution: SQLite parent_session_id lookup, then a
+    suffix/startswith match over registry keys."""
+    import sqlite3 as _sq
+
+    runs = _load_active_runs()
+    if not runs:
+        return None
+
+    # 1) DB parent lookup: the visible session's parent IS the lineage root
+    try:
+        con = sqlite3.connect(str(STATE), timeout=5)
+        row = con.execute(
+            "SELECT parent_session_id FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        con.close()
+    except Exception:
+        row = None
+    if row and row[0] and row[0] in runs:
+        entry = runs[row[0]]
+        if int(time.time()) - int(entry.get("started", 0)) < 1800:
+            return entry.get("run_id")
+
+    # 2) Fuzzy key match: same suffix or one key contains the other
+    for key, entry in runs.items():
+        if session_id.endswith(key) or key.endswith(session_id):
+            if int(time.time()) - int(entry.get("started", 0)) < 1800:
+                return entry.get("run_id")
+    return None
+
+
 def _ticket_key() -> str:
     """HMAC key for tickets — derived from STATE_BRIDGE_TOKEN (never leaves)."""
     import hashlib
@@ -1125,13 +1159,19 @@ class Handler(BaseHTTPRequestHandler):
         """
         import urllib.request as u
         import json as _json
-        api = os.environ.get("HERMES_API_URL", "http://127.0.0.1:8642")
+        api = os.environ.get("HERMES_API_URL", "http://127.0.0.1:18642")
         api_key = os.environ.get("API_SERVER_KEY", "")
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
+        # 2026-09-01 FIX: active_runs.json is keyed by the LINEAGE ROOT id
+        # (api_*) written by the chat-stream proxy, but the dashboard sends
+        # the visible session id (2026…, whose parent_session_id IS the
+        # lineage root). Try exact, then resolve via parent_session_id.
         run_id = _get_active_run(session_id)
+        if not run_id:
+            run_id = _get_active_run_by_any_key(session_id)
         if not run_id:
             return {"ok": False, "status": "no_active_run"}
         if action == "steer":
@@ -1148,26 +1188,41 @@ class Handler(BaseHTTPRequestHandler):
             headers=headers,
             method="POST",
         )
-        try:
-            with u.urlopen(req, timeout=20) as resp:
-                data = _json.loads(resp.read() or b"{}")
-            # Map run-scoped responses onto the statuses _session_steer/_stop expect.
-            if action == "steer" and data.get("accepted"):
-                return {"status": "queued"}
-            if action == "stop" and (data.get("interrupted") or data.get("status") == "interrupted"):
-                return {"status": "interrupted"}
-            return {"ok": True, **data}
-        except u.HTTPError as e:
+        # 2026-09-01 FIX: the API only accepts steers while the run is
+        # INSIDE a tool call. Between calls (30-90s of thinking with
+        # long-context models) it 409s — a first-try steer usually bounced
+        # and the failure was masked. Retry for up to ~35s on 409/404 before
+        # reporting no_active_run.
+        import time as _time
+        attempts = 8 if action == "steer" else 1
+        last_err = None
+        for attempt in range(attempts):
             try:
-                err_data = _json.loads(e.read() or b"{}")
-            except Exception:
-                err_data = {}
-            code = err_data.get("error", {}).get("code", "") if isinstance(err_data.get("error"), dict) else ""
-            if action == "steer" and (code == "run_not_accepting_steer" or e.code in (409, 404)):
-                return {"ok": False, "status": "no_active_run"}
-            return {"ok": False, "error": str(e), **err_data}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+                with u.urlopen(req, timeout=20) as resp:
+                    data = _json.loads(resp.read() or b"{}")
+                if action == "steer" and data.get("accepted"):
+                    return {"status": "queued"}
+                if action == "stop" and (data.get("interrupted") or data.get("status") == "interrupted"):
+                    return {"status": "interrupted"}
+                return {"ok": True, **data}
+            except u.HTTPError as e:
+                try:
+                    err_data = _json.loads(e.read() or b"{}")
+                except Exception:
+                    err_data = {}
+                code = err_data.get("error", {}).get("code", "") if isinstance(err_data.get("error"), dict) else ""
+                if action == "steer" and (code == "run_not_accepting_steer" or e.code in (409, 404)):
+                    if attempt + 1 < attempts:
+                        _time.sleep(5)
+                        continue
+                    return {"ok": False, "status": "no_active_run"}
+                return {"ok": False, "error": str(e), **err_data}
+            except Exception as e:
+                last_err = e
+                break
+        if last_err:
+            return {"ok": False, "error": str(last_err)}
+        return {"ok": False, "status": "no_active_run"}
 
     def _session_steer(self, session_id: str, text: str) -> str:
         result = self._session_control("steer", session_id, text)
@@ -1444,7 +1499,11 @@ class Handler(BaseHTTPRequestHandler):
         import json as _json
         import sqlite3 as _sqlite3
 
-        home = os.path.expanduser("~/.hermes")
+        # 2026-09-01 FIX: was os.path.expanduser("~/.hermes") — a stale
+        # June-era WSL-migration leftover. /cron list showed 19 June jobs,
+        # /status showed a Jun 9 session. Use the LIVE Hermes home (module
+        # HERMES constant already resolves HERMES_HOME env correctly).
+        home = str(HERMES)
 
         if name == "cron" and (not arg or arg.split()[0] in ("list", "ls")):
             try:
@@ -1702,6 +1761,60 @@ class Handler(BaseHTTPRequestHandler):
                 return f"⚠️ Debug report failed: {e}"
         if name == "debug":
             return "Usage: `/debug local` — prints the report locally. (`/debug nous` uploads — not from chat.)"
+
+        # 2026-09-01: native command.dispatch has no executor for these
+        # (they 502'd "not a quick/plugin command"). Serve with real data.
+        if name == "help":
+            return (
+                "**Dashboard chat commands**\n\n"
+                "- `/cron list` — scheduled jobs (live)\n"
+                "- `/status` — latest session + model\n"
+                "- `/agents` `/tasks` — active sessions\n"
+                "- `/usage` `/insights` — token totals\n"
+                "- `/model <name>` — switch this session's brain\n"
+                "- `/steer <text>` — live correction to the running agent\n"
+                "- `/queue <text>` — send after the current run finishes\n"
+                "- `/stop` — stop the current run\n"
+                "- `/new` `/title` `/retry` `/fork` — session control\n"
+                "- `/context` — token/context stats\n"
+                "- `/restart confirm` `/update confirm` — gateway lifecycle\n"
+            )
+        if name == "sessions":
+            try:
+                con = _sqlite3.connect(f"{home}/state.db")
+                rows = con.execute(
+                    "select id, source, model, message_count, started_at from sessions "
+                    "order by started_at desc limit 10"
+                ).fetchall()
+                con.close()
+                if not rows:
+                    return "No sessions found."
+                lines = ["**Recent sessions**", ""]
+                for sid_, src, mdl, cnt, started in rows:
+                    import time as _t
+                    lines.append(f"- `{sid_[:22]}…` ({src}) — {cnt} msgs — {mdl or '?'} — {_t.strftime('%b %d %H:%M', _t.localtime(started))}")
+                return "\n".join(lines)
+            except Exception as e:
+                return f"⚠️ Sessions read failed: {e}"
+        if name == "model" and not arg:
+            try:
+                con = _sqlite3.connect(f"{home}/state.db")
+                row = con.execute(
+                    "select model, model_config from sessions where ended_at is null "
+                    "order by last_active desc limit 1"
+                ).fetchone()
+                con.close()
+                if row:
+                    import json as _j
+                    eff = "?"
+                    try:
+                        eff = (_j.loads(row[1]) or {}).get("model") or row[0]
+                    except Exception:
+                        eff = row[0]
+                    return f"**Model**\n\n- Latest active session: `{row[0]}`\n- Usage: `/model <name>` to switch"
+            except Exception:
+                pass
+            return "Usage: `/model <name>` — e.g. `/model glm-5.3-flash`"
 
         return ""  # not handled — caller falls back to bridge
 
