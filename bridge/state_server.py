@@ -1493,12 +1493,25 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(e)}, 502)
 
     def _usage_analytics(self) -> None:
-        """GET /api/usage?provider=ollama-cloud&bucket=day|week|month&days=90&from=&to=
+        """GET /api/usage?bucket=day|week|month&days=90&from=&to=
 
-        Aggregates the gateway's session_model_usage table (ground truth —
-        written by the agent core after every API call) into per-bucket token
-        in/out and request counts for the Mission Control usage graphs.
-        Costs use Ollama Cloud metered prices (per-M: in / cached-in / out).
+        TWO real data sources, clearly labelled:
+
+        1. "live" — Ollama's own account meter (GET https://ollama.com/api/usage
+           with the account's OLLAMA_API_KEY): authoritative dollars + request
+           counts for the current monthly window, plus account identity via
+           POST /api/me. No daily breakdown exists on Ollama's API (verified
+           against docs.ollama.com 2026-09-02) — this is a snapshot, not a series.
+
+        2. "ledger" — the gateway's session_model_usage table: the agent core
+           upserts a TRUE DELTA per API call (ON CONFLICT adds), keyed by
+           (session, model, base-url, task). This powers the date-range series.
+           first_seen/last_seen are window bounds of accumulation, NOT call
+           timestamps — tokens sum exactly.
+
+        Costs are computed from Ollama's published per-M prices at the
+        cached-input rate for input (Hermes resends conversation prefixes, so
+        input is dominantly cache-hits on ollama.com).
         """
         import sqlite3 as _sq
         from urllib.parse import urlparse, parse_qs, unquote
@@ -1513,7 +1526,11 @@ class Handler(BaseHTTPRequestHandler):
         date_from = (q.get("from", [""])[0] or "").strip()
         date_to = (q.get("to", [""])[0] or "").strip()
 
-        # Ollama Cloud metered prices ($/M tokens): model-prefix -> [in, cached-in, out]
+        # Ollama Cloud PUBLISHED metered prices ($/M tokens), keyed by model
+        # prefix: (input, cached-input, output). From ollama.com/pricing
+        # (2026-09-02). Input is priced at the CACHED rate because Hermes
+        # resends conversation prefixes every call and ollama.com's prompt
+        # cache serves those — the uncached rate would overstate cost ~3-5x.
         PRICES = {
             "glm-5.3-flash": (0.15, 0.03, 0.5),
             "glm-5.3": (1.4, 0.26, 4.4),
@@ -1537,37 +1554,42 @@ class Handler(BaseHTTPRequestHandler):
                     return p
             return PRICES["glm-5.3-flash"]
 
-        # SQLite date buckets. first_seen/last_seen are epoch seconds; anchor
-        # the bucket to SAST (UTC+2) like every other Mission Control surface.
-        if bucket == "day":
-            fmt, step = "day", 1
-        elif bucket == "week":
-            fmt, step = "week", 7
-        elif bucket == "month":
-            fmt, step = "month", 30
-        else:  # custom — group by day over the given window
-            fmt, step = "day", 1
-
+        # ── Ledger series (date-range data) ──
+        # Window: explicit from/to (SAST dates) wins; else trailing `days`.
+        # Bucket by the row's ACCUMULATION START day (first_seen, SAST) —
+        # upserts keep first_seen fixed per billing key, so each call's tokens
+        # land in the day its billing key was opened. Good enough at daily
+        # granularity; exact per-call times aren't stored in this table.
         where = ["LOWER(COALESCE(billing_provider,'')) = ?"]
         params = [provider]
         if date_from:
-            where.append("first_seen >= strftime('%s', ? , '-2 hours')")
+            # 'from' is a SAST date: Jul 1 00:00 SAST = Jun 30 22:00 UTC =
+            # strftime(from,'-1 day','+22 hours').
+            where.append("first_seen >= strftime('%s', ?, '-1 day', '+22 hours')")
             params.append(date_from)
         if date_to:
-            where.append("first_seen <= strftime('%s', ?, '+2 hours', '+1 day')")
+            # Inclusive of the whole `to` day in SAST: end bound = to-day
+            # 23:59:59 SAST = to+1day 00:00 SAST minus 1s = to+1day 21:59:59 UTC
+            # = strftime(to,'-2 hours','+1 day') as an exclusive upper bound.
+            where.append("first_seen < strftime('%s', ?, '-2 hours', '+1 day')")
             params.append(date_to)
+        if not date_from:
+            where.append("first_seen >= strftime('%s','now','-{days} days')".replace("{days}", str(days)))
 
         sql = f"""
             SELECT strftime('%Y-%m-%d', first_seen, 'unixepoch', '+2 hours') AS d,
                    model,
+                   CASE WHEN task='' THEN 'main' ELSE task END AS task_kind,
                    SUM(COALESCE(input_tokens,0)) AS tin,
                    SUM(COALESCE(output_tokens,0)) AS tout,
                    SUM(COALESCE(cache_read_tokens,0)) AS cache_read,
-                   SUM(COALESCE(api_call_count,0)) AS calls
+                   SUM(COALESCE(reasoning_tokens,0)) AS reasoning,
+                   SUM(COALESCE(api_call_count,0)) AS calls,
+                   SUM(COALESCE(estimated_cost_usd,0)) AS est_cost,
+                   MIN(first_seen) AS win_start
             FROM session_model_usage
             WHERE {' AND '.join(where)}
-              AND first_seen >= strftime('%s','now','-{days} days')
-            GROUP BY d, model
+            GROUP BY d, model, task_kind
             ORDER BY d
         """
         try:
@@ -1578,39 +1600,106 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": f"usage query failed: {e}"}, 500)
             return
 
-        # Aggregate by bucket
+        # Aggregate by bucket + per-model + per-task
         import datetime as _dt
         series: dict = {}
-        totals = {"tokens_in": 0, "tokens_out": 0, "cache_read": 0, "requests": 0, "cost_usd": 0.0}
-        for d, model, tin, tout, cache, calls in rows:
+        per_model: dict = {}
+        per_task: dict = {}
+        totals = {"tokens_in": 0, "tokens_out": 0, "cache_read": 0, "reasoning": 0,
+                  "requests": 0, "cost_usd": 0.0, "sessions": set()}
+        session_keys = set()
+        for d, model, task_kind, tin, tout, cache, reasoning, calls, est, win_start in rows:
             key = d
             if bucket == "week":
                 try:
                     y, m, dd = map(int, d.split("-"))
-                    key = f"{_dt.date(y, m, dd).isocalendar()[0]}-W{_dt.date(y, m, dd).isocalendar()[1]:02d}"
+                    iso = _dt.date(y, m, dd).isocalendar()
+                    key = f"{iso[0]}-W{iso[1]:02d}"
                 except Exception:
                     key = d
             elif bucket == "month":
                 key = d[:7]
             pin, pcache, pout = _price(model)
-            cost = (tin * pin + cache * pcache + tout * pout) / 1e6
-            b = series.setdefault(key, {"bucket": key, "tokens_in": 0, "tokens_out": 0, "requests": 0, "cost_usd": 0.0})
+            cost = (tin * pcache + cache * pcache + tout * pout) / 1e6
+            b = series.setdefault(key, {"bucket": key, "tokens_in": 0, "tokens_out": 0,
+                                        "requests": 0, "cost_usd": 0.0})
             b["tokens_in"] += tin or 0
             b["tokens_out"] += tout or 0
             b["requests"] += calls or 0
             b["cost_usd"] += cost
+            pm = per_model.setdefault(model, {"model": model, "tokens_in": 0, "tokens_out": 0,
+                                              "requests": 0, "cost_usd": 0.0})
+            pm["tokens_in"] += tin or 0
+            pm["tokens_out"] += tout or 0
+            pm["requests"] += calls or 0
+            pm["cost_usd"] += cost
+            pt = per_task.setdefault(task_kind, {"task": task_kind, "requests": 0,
+                                                 "tokens_in": 0, "tokens_out": 0})
+            pt["requests"] += calls or 0
+            pt["tokens_in"] += tin or 0
+            pt["tokens_out"] += tout or 0
             totals["tokens_in"] += tin or 0
             totals["tokens_out"] += tout or 0
             totals["cache_read"] += cache or 0
+            totals["reasoning"] += reasoning or 0
             totals["requests"] += calls or 0
             totals["cost_usd"] += cost
+            session_keys.add(win_start)
 
         out_series = sorted(series.values(), key=lambda x: x["bucket"])
+        models_out = sorted(per_model.values(), key=lambda x: -x["requests"])
+        for m in models_out:
+            m["cost_usd"] = round(m["cost_usd"], 4)
+        for b in out_series:
+            b["cost_usd"] = round(b["cost_usd"], 4)
+
+        # ── Live Ollama account meter (real API, real key) ──
+        live = None
+        try:
+            import urllib.request as _u
+            key = ""
+            env_path = str(HERMES / ".env")
+            if os.path.exists(env_path):
+                for line in open(env_path, encoding="utf-8", errors="ignore"):
+                    if line.strip().startswith("OLLAMA_API_KEY="):
+                        key = line.split("=", 1)[1].strip()
+            if key:
+                headers = {"Authorization": f"Bearer {key}"}
+                with _u.urlopen(_u.Request("https://ollama.com/api/usage", headers=headers), timeout=10) as r:
+                    meter = json.loads(r.read() or b"{}")
+                me = {}
+                try:
+                    req = _u.Request("https://ollama.com/api/me", method="POST",
+                                     headers={**headers, "Content-Type": "application/json"}, data=b"{}")
+                    with _u.urlopen(req, timeout=10) as r:
+                        me = json.loads(r.read() or b"{}")
+                except Exception:
+                    me = {}
+                monthly = (meter.get("limits") or {}).get("monthly", {})
+                period = ((meter.get("activity") or {}).get("period") or {})
+                live = {
+                    "email": me.get("Email"),
+                    "name": me.get("Name"),
+                    "plan": me.get("Plan"),
+                    "monthly_usage": float(monthly.get("usage", 0) or 0),
+                    "monthly_window": period,
+                    "models": [
+                        {"model": m.get("name"), "requests": m.get("request_count", 0)}
+                        for m in (monthly.get("models") or [])
+                    ],
+                }
+        except Exception as e:
+            live = {"error": str(e)[:160]}
+
         self._json({
             "provider": provider,
             "bucket": bucket,
             "series": out_series,
-            "totals": {**totals, "cost_usd": round(totals["cost_usd"], 4)},
+            "per_model": models_out,
+            "per_task": sorted(per_task.values(), key=lambda x: -x["requests"]),
+            "totals": {**totals, "cost_usd": round(totals["cost_usd"], 4),
+                       "sessions": len(session_keys)},
+            "live": live,
         })
 
     def _exec_dashboard_command(self, name: str, arg: str) -> str | object:

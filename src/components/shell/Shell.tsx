@@ -23,6 +23,7 @@ import {
   Moon,
   Lock,
   Command,
+  Activity,
 } from "lucide-react";
 
 const NAV = [
@@ -36,6 +37,7 @@ const NAV = [
   { href: "/chat", label: "Chat + Voice", icon: MessageSquare },
   { href: "/studio", label: "Content Studio", icon: Film },
   { href: "/trading", label: "Trading", icon: TrendingUp },
+  { href: "/usage", label: "Usage", icon: Activity },
   { href: "/dev", label: "Development", icon: Wrench },
   { href: "/personal", label: "Personal", icon: User },
   { href: "/native", label: "Native UI", icon: AppWindow },
