@@ -253,8 +253,29 @@ def _resolve_session_run_id(session_id: str) -> str | None:
             {"Authorization": f"Bearer {api_key}"} if api_key else {}))
         with _u.urlopen(req, timeout=6) as resp:
             data = _json_loads_local(resp.read() or b"{}")
+        # 2026-09-02 (fork-lineage match): a run may execute under the NEWEST
+        # lineage fork while the dashboard probes the ROOT id (compaction forks
+        # rebind writes). Match the requested id OR any of its descendants by
+        # walking parent_session_id links in the session DB.
+        lineage = {session_id}
+        try:
+            import sqlite3 as _sq
+            _db = _sq.connect(str(HERMES / "state.db"))
+            frontier = [session_id]
+            for _ in range(12):
+                if not frontier:
+                    break
+                q = ",".join("?" * len(frontier))
+                rows = _db.execute(
+                    f"SELECT id FROM sessions WHERE parent_session_id IN ({q})",
+                    frontier).fetchall()
+                frontier = [r0[0] for r0 in rows if r0[0] not in lineage]
+                lineage.update(frontier)
+            _db.close()
+        except Exception:
+            pass
         for r in (data.get("runs") or []):
-            if r.get("session_id") == session_id and r.get("status") == "running":
+            if (r.get("session_id") in lineage and r.get("status") == "running"):
                 import time as _t
                 if _t.time() - float(r.get("updated_at", 0) or 0) < 900:
                     return r.get("run_id")
