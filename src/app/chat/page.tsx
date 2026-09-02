@@ -1672,6 +1672,7 @@ export default function ChatPage() {
           // route through the real steer path so it lands at the next
           // tool boundary, and surface the server's honest ack.
           let steerAck = "";
+          let steerFailed = false;
           try {
             const res = await fetch("/api/chat/command", {
               method: "POST",
@@ -1679,16 +1680,24 @@ export default function ChatPage() {
               body: JSON.stringify({ command: `/steer ${trimmed}`, session_id: sessionId }),
             });
             const data = await res.json();
-            steerAck = data?.output ?? "⚠️ Steer could not be delivered — send it as a normal message.";
+            steerAck = data?.output ?? "";
+            // 2026-09-02 FIX (message loss): if the "live" run turned out to be
+            // stale (completed between probe and steer — race), the steer fails
+            // and the message must NOT be swallowed. Fall through to the normal
+            // send path so it reaches the agent as a fresh turn.
+            steerFailed = !steerAck || steerAck.includes("No live agent");
           } catch {
-            steerAck = "⚠️ Steer failed to send (network). Send it as a normal message instead.";
+            steerFailed = true;
           }
-          setMessages((m) => [
-            ...m,
-            { role: "user", content: trimmed },
-            { role: "system", content: steerAck },
-          ]);
-          return;
+          if (!steerFailed) {
+            setMessages((m) => [
+              ...m,
+              { role: "user", content: trimmed },
+              { role: "system", content: steerAck || "⏩ Steered." },
+            ]);
+            return;
+          }
+          // fall through to normal send below
         }
       } catch {
         // Probe failure = fall through to normal send (never block a message).
@@ -2162,6 +2171,23 @@ export default function ChatPage() {
                   full = content;
                   if (sessionId) getModuleLive(sessionId).streamedText = content;
                   if (activeIdRef.current === sessionId) setStreamedText(content);
+                  // 2026-09-02 FIX (silent fork rebind): when the session hit a
+                  // compaction fork, the agent writes the reply into the FORK
+                  // session, not the id this tab opened (X-Hermes-Session-Id /
+                  // payload.session_id carry the effective id). Without this the
+                  // reply persists server-side but never appears in the open
+                  // chat ("messages not appearing"). Re-bind the view to the
+                  // effective session and load its history.
+                  {
+                    const eff = (payload as any)?.session_id;
+                    if (eff && sessionId && eff !== sessionId && activeIdRef.current === sessionId) {
+                      dbg("sse", `fork rebind: ${sessionId} -> ${eff}`);
+                      setActiveId(eff);
+                      activeIdRef.current = eff;
+                      setMessages([]);
+                      loadMessages(String(eff), true, true);
+                    }
+                  }
                   // Settle any tool that hasn't received its completion yet —
                   // tool.completed frames can race behind assistant.completed.
                   // Freeze the FINAL message with settled tools so its chips

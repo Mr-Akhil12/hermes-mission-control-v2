@@ -196,10 +196,47 @@ def _resolve_session_run_id(session_id: str) -> str | None:
     """Resolve the session's live run: active_runs.json first (chat-stream proxy),
     then the gateway's /api/runs/live registry (covers runs created via /v1/runs
     or by clients that disconnected before the proxy saw run.started).
-    2026-09-02: shared by /live probe and /events reattach."""
-    run_id = _get_active_run(session_id) or _get_active_run_by_any_key(session_id)
-    if run_id:
-        return run_id
+    2026-09-02: shared by /live probe and /events reattach.
+    2026-09-02 LATE FIX: active_runs.json entries can be STALE — the chat-stream
+    proxy only clears its entry when IT sees run.completed, but if the original
+    client disconnected, nobody clears it and a completed run looks "live" for
+    30 min. Every candidate is now verified against the gateway's run status;
+    non-running candidates are rejected and we still fall through to the
+    /api/runs/live scan (which filters properly)."""
+    candidates = []
+    rid = _get_active_run(session_id) or _get_active_run_by_any_key(session_id)
+    if rid:
+        candidates.append(rid)
+    verified = None
+    import urllib.request as _u
+    api = os.environ.get("HERMES_API_URL", "http://127.0.0.1:18642")
+    api_key = os.environ.get("API_SERVER_KEY", "")
+    if not api_key:
+        try:
+            for _line in open(str(HERMES / ".env"), encoding="utf-8", errors="ignore"):
+                if _line.strip().startswith("API_SERVER_KEY="):
+                    api_key = _line.split("=", 1)[1].strip()
+                    break
+        except Exception:
+            pass
+    for cand in candidates:
+        try:
+            req = _u.Request(f"{api}/v1/runs/{cand}", headers=(
+                {"Authorization": f"Bearer {api_key}"} if api_key else {}))
+            with _u.urlopen(req, timeout=6) as resp:
+                d = _json_loads_local(resp.read() or b"{}")
+            if d.get("status") == "running":
+                verified = cand
+                break
+            # Completed/failed/swept: actively clear the stale active_runs entry
+            # so later probes don't re-check a corpse.
+            _clear_active_run(session_id)
+        except Exception:
+            # 404 = run swept/finished; treat as stale and clear
+            _clear_active_run(session_id)
+            continue
+    if verified:
+        return verified
     try:
         import urllib.request as _u
         api = os.environ.get("HERMES_API_URL", "http://127.0.0.1:18642")
