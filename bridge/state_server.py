@@ -192,6 +192,45 @@ def _save_active_runs(runs: dict) -> None:
         pass
 
 
+def _resolve_session_run_id(session_id: str) -> str | None:
+    """Resolve the session's live run: active_runs.json first (chat-stream proxy),
+    then the gateway's /api/runs/live registry (covers runs created via /v1/runs
+    or by clients that disconnected before the proxy saw run.started).
+    2026-09-02: shared by /live probe and /events reattach."""
+    run_id = _get_active_run(session_id) or _get_active_run_by_any_key(session_id)
+    if run_id:
+        return run_id
+    try:
+        import urllib.request as _u
+        api = os.environ.get("HERMES_API_URL", "http://127.0.0.1:18642")
+        api_key = os.environ.get("API_SERVER_KEY", "")
+        if not api_key:
+            try:
+                for _line in open(str(HERMES / ".env"), encoding="utf-8", errors="ignore"):
+                    if _line.strip().startswith("API_SERVER_KEY="):
+                        api_key = _line.split("=", 1)[1].strip()
+                        break
+            except Exception:
+                pass
+        req = _u.Request(f"{api}/api/runs/live", headers=(
+            {"Authorization": f"Bearer {api_key}"} if api_key else {}))
+        with _u.urlopen(req, timeout=6) as resp:
+            data = _json_loads_local(resp.read() or b"{}")
+        for r in (data.get("runs") or []):
+            if r.get("session_id") == session_id and r.get("status") == "running":
+                import time as _t
+                if _t.time() - float(r.get("updated_at", 0) or 0) < 900:
+                    return r.get("run_id")
+    except Exception:
+        pass
+    return None
+
+
+def _json_loads_local(b):
+    import json as _j
+    return _j.loads(b or b"{}")
+
+
 def _set_active_run(session_id: str, run_id: str) -> None:
     with _ACTIVE_RUNS_LOCK:
         runs = _load_active_runs()
@@ -1048,7 +1087,10 @@ class Handler(BaseHTTPRequestHandler):
         # path = /api/sessions/{session_id}/events?since=N
         parts = path.split("/")
         session_id = parts[3] if len(parts) > 3 else ""
-        run_id = _get_active_run(session_id)
+        # 2026-09-02 FIX (unattached desync): resolve via active_runs.json AND the
+        # gateway's live-runs registry — /v1/runs-created runs and runs whose
+        # original client disconnected were invisible here ("no live run").
+        run_id = _resolve_session_run_id(session_id)
 
         if not run_id:
             try:
@@ -1172,9 +1214,9 @@ class Handler(BaseHTTPRequestHandler):
         # (api_*) written by the chat-stream proxy, but the dashboard sends
         # the visible session id (2026…, whose parent_session_id IS the
         # lineage root). Try exact, then resolve via parent_session_id.
-        run_id = _get_active_run(session_id)
-        if not run_id:
-            run_id = _get_active_run_by_any_key(session_id)
+        # 2026-09-02 FIX: shared resolver also covers /v1/runs-created runs and
+        # runs whose original client disconnected (gateway's /api/runs/live).
+        run_id = _resolve_session_run_id(session_id)
         if not run_id:
             return {"ok": False, "status": "no_active_run"}
         if action == "steer":
@@ -2074,7 +2116,12 @@ class Handler(BaseHTTPRequestHandler):
     def _log_ops(self, msg: str) -> None:
         """Append a line to the ops log so restarts/updates are auditable."""
         try:
-            with open(os.path.expanduser("~/.hermes/logs/dashboard-ops.log"), "a") as f:
+            # 2026-09-02 FIX: was expanduser("~/.hermes/...") — on this Windows
+            # machine the real home is %LOCALAPPDATA%\hermes, so ~/.hermes never
+            # existed and every ops write silently vanished. Use HERMES.
+            log_dir = HERMES / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            with open(str(log_dir / "dashboard-ops.log"), "a", encoding="utf-8") as f:
                 f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
         except Exception:
             pass
@@ -2150,36 +2197,14 @@ class Handler(BaseHTTPRequestHandler):
             # 2026-09-02 (unattached-run steer): does this session have a LIVE
             # run right now? The PWA probes this before sending so a message
             # typed into an unattached tab steers instead of queueing a second
-            # turn. Resolution: active_runs.json (chat-stream proxy), then the
-            # API's pollable run status (agent actually mid-turn).
-            if not session_id:
+            # turn. _resolve_session_run_id checks active_runs.json AND the
+            # gateway's /api/runs/live registry (covers /v1/runs-created runs
+            # and runs whose original client disconnected).
+            run_id = _resolve_session_run_id(session_id)
+            if run_id:
+                self._json({"ok": True, "name": "live", "live": True, "run_id": run_id})
+            else:
                 self._json({"ok": True, "name": "live", "live": False})
-                return
-            run_id = _get_active_run(session_id) or _get_active_run_by_any_key(session_id)
-            if not run_id:
-                # active_runs.json is proxy-stream-scoped; a run started by a
-                # client that later disconnected may still be executing. Ask
-                # the API's run status registry before answering "no".
-                import urllib.request as _u
-                api = os.environ.get("HERMES_API_URL", "http://127.0.0.1:18642")
-                api_key = os.environ.get("API_SERVER_KEY", "")
-                try:
-                    req = _u.Request(f"{api}/api/runs/live", headers=(
-                        {"Authorization": f"Bearer {api_key}"} if api_key else {}))
-                    with _u.urlopen(req, timeout=6) as resp:
-                        data = _json.loads(resp.read() or b"{}")
-                    for r in (data.get("runs") or []):
-                        if (r.get("session_id") in (session_id, payload.get("session_id"))
-                                and r.get("status") == "running"):
-                            import time as _time
-                            if _time.time() - float(r.get("updated_at", 0) or 0) < 900:
-                                self._json({"ok": True, "name": "live", "live": True, "run_id": r.get("run_id")})
-                                return
-                except Exception:
-                    pass
-                self._json({"ok": True, "name": "live", "live": False})
-                return
-            self._json({"ok": True, "name": "live", "live": True, "run_id": run_id})
             return
         if name == "steer" and session_id:
             self._json({"ok": True, "name": "steer", "output": self._session_steer(session_id, arg)})
