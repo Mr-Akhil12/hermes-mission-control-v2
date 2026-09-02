@@ -2991,7 +2991,7 @@ export default function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, sessions, reattachRun]);
 
-  const toggleMic = useCallback(() => {
+  const toggleMic = useCallback(async () => {
     if (listening) {
       recognitionRef.current?.stop();
       setListening(false);
@@ -3001,6 +3001,22 @@ export default function ChatPage() {
     if (!SR) {
       setError("Speech recognition not supported in this browser. Use Chrome or Safari.");
       return;
+    }
+    // Prime the mic permission EXPLICITLY — SpeechRecognition alone fails with
+    // "not-allowed" WITHOUT ever showing Chrome's popup (and Chrome never
+    // re-prompts after an earlier deny). getUserMedia forces the popup on
+    // first use and gives us the real rejection reason when blocked.
+    if (navigator.mediaDevices?.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((t) => t.stop());
+      } catch {
+        setListening(false);
+        setError(
+          "Microphone permission is denied for this site. Open Chrome → the lock/site icon in the address bar → Permissions → Microphone → set to Allow (or reset), then tap the mic again.",
+        );
+        return;
+      }
     }
     const rec = new SR();
     rec.lang = "en-ZA";
