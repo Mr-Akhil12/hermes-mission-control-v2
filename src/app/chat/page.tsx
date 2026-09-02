@@ -3072,17 +3072,45 @@ export default function ChatPage() {
         send(text);
       }
     };
-    rec.onerror = () => {
+    rec.onerror = (e: any) => {
       if (silenceTimer) {
         clearTimeout(silenceTimer);
         silenceTimer = null;
       }
       setListening(false);
+      // Surfacing the code is the fix for the "Listening flashes for 0.02s"
+      // bug: recognition was dying instantly (mic permission / Electron shell)
+      // and this handler swallowed the reason. Map codes to actionable copy.
+      const code = e?.error ?? e?.message ?? String(e);
+      if (code === "aborted") return; // normal on rapid stop
+      if (code === "not-allowed" || code === "service-not-allowed") {
+        setError(
+          /Electron/i.test(navigator.userAgent)
+            ? "The desktop app shell can't run speech recognition — open the dashboard in Chrome and tap the mic there."
+            : "Microphone blocked — click the lock/site icon in the address bar, allow Microphone, then tap the mic again.",
+        );
+      } else if (code === "audio-capture") {
+        setError("No microphone found on this device.");
+      } else if (code === "network") {
+        setError("Speech service unreachable — check your connection and retry.");
+      } else {
+        setError(`Voice input failed: ${code}`);
+      }
     };
     recognitionRef.current = rec;
-    rec.start();
-    setListening(true);
-    setError(null);
+    // "Listening" turns on ONLY when the engine actually starts (onstart) —
+    // setting it optimistically before start() is what produced the 0.02s
+    // flash whenever recognition died instantly.
+    rec.onstart = () => {
+      setListening(true);
+      setError(null);
+    };
+    try {
+      rec.start();
+    } catch (e: any) {
+      setListening(false);
+      setError(`Voice input failed to start: ${e?.message ?? e}`);
+    }
   }, [listening, send]);
 
   const selectSession = useCallback((id: string) => {
