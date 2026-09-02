@@ -2991,6 +2991,28 @@ export default function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, sessions, reattachRun]);
 
+  // 2026-09-02: proactive mic permission priming — the FIRST time the user
+  // taps anywhere in the composer area, fire a silent getUserMedia({audio})
+  // so Chrome shows the "Allow microphone?" popup on a real user gesture
+  // (it only prompts on gesture, and never re-prompts a site it has
+  // hard-blocked). Once granted/decided, the flag stops future prompts.
+  const micPrimedRef = useRef(false);
+  useEffect(() => {
+    if (micPrimedRef.current) return;
+    const prime = async () => {
+      micPrimedRef.current = true;
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) return;
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((t3) => t3.stop());
+      } catch {
+        /* user denied or site blocked — the mic-tap guidance handles it */
+      }
+    };
+    window.addEventListener("pointerdown", prime, { once: true });
+    return () => window.removeEventListener("pointerdown", prime);
+  }, []);
+
   const toggleMic = useCallback(async () => {
     if (listening) {
       recognitionRef.current?.stop();
@@ -3088,7 +3110,7 @@ export default function ChatPage() {
         send(text);
       }
     };
-    rec.onerror = (e: any) => {
+    rec.onerror = async (e: any) => {
       if (silenceTimer) {
         clearTimeout(silenceTimer);
         silenceTimer = null;
@@ -3100,11 +3122,27 @@ export default function ChatPage() {
       const code = e?.error ?? e?.message ?? String(e);
       if (code === "aborted") return; // normal on rapid stop
       if (code === "not-allowed" || code === "service-not-allowed") {
-        setError(
-          /Electron/i.test(navigator.userAgent)
-            ? "The desktop app shell can't run speech recognition — open the dashboard in Chrome and tap the mic there."
-            : "Microphone blocked — click the lock/site icon in the address bar, allow Microphone, then tap the mic again.",
-        );
+        if (/Electron/i.test(navigator.userAgent)) {
+          setError("The desktop app shell can't run speech recognition — open the dashboard in Chrome and tap the mic there.");
+        } else {
+          // 2026-09-02: SR failing not-allowed while getUserMedia priming passed
+          // means Chrome holds a stale deny for the SPEECH path specifically.
+          // Force the browser permission popup with one more getUserMedia call
+          // (this fires within the error-event task — Chrome still counts the
+          // original tap's transient activation in most cases); if it also
+          // fails, the site is hard-blocked and only site settings can fix it.
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            stream.getTracks().forEach((t2) => t2.stop());
+            // Mic IS allowed — the speech service was blocked instead. Retry SR once.
+            setError("Mic permission is OK — the speech service was blocked. Tap the mic again to retry.");
+            return;
+          } catch {
+            setError(
+              "Microphone blocked for this site. Tap the lock/site icon in the address bar → Permissions → Microphone → Allow (Chrome remembers the site choice, so it must be reset there once), then tap the mic again.",
+            );
+          }
+        }
       } else if (code === "audio-capture") {
         setError("No microphone found on this device.");
       } else if (code === "network") {
