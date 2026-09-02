@@ -1677,11 +1677,21 @@ class Handler(BaseHTTPRequestHandler):
                     me = {}
                 monthly = (meter.get("limits") or {}).get("monthly", {})
                 period = ((meter.get("activity") or {}).get("period") or {})
+                # 2026-09-02 UNIT FIX: Akhil's Ollama dashboard shows "$5.91 of $60
+                # used" while the meter's raw value was 0.0985 — the API's
+                # `usage` number is a FRACTION of the plan's monthly credit pool,
+                # not dollars. Pro = $60/mo. Convert for display; keep the raw
+                # fraction too.
+                plan = (me.get("Plan") or "").lower()
+                credits_pool = {"pro": 60.0, "max": 300.0}.get(plan)
+                usage_frac = float(monthly.get("usage", 0) or 0)
                 live = {
                     "email": me.get("Email"),
                     "name": me.get("Name"),
                     "plan": me.get("Plan"),
-                    "monthly_usage": float(monthly.get("usage", 0) or 0),
+                    "usage_fraction": usage_frac,
+                    "credits_pool_usd": credits_pool,
+                    "credits_used_usd": round(usage_frac * credits_pool, 2) if credits_pool else None,
                     "monthly_window": period,
                     "models": [
                         {"model": m.get("name"), "requests": m.get("request_count", 0)}

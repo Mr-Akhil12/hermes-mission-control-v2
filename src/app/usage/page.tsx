@@ -44,7 +44,9 @@ type UsageResp = {
     email?: string | null;
     name?: string | null;
     plan?: string | null;
-    monthly_usage?: number;
+    usage_fraction?: number;
+    credits_pool_usd?: number | null;
+    credits_used_usd?: number | null;
     monthly_window?: { type?: string; starting_at?: string; ending_at?: string };
     models?: { model: string; requests: number }[];
     error?: string;
@@ -317,8 +319,23 @@ export default function UsagePage() {
                 </div>
               </div>
               <div>
-                <div className="text-xs" style={{ color: "var(--text-faint)" }}>Metered usage (Ollama&apos;s number)</div>
-                <div className="mt-0.5 text-lg font-bold">{fmtCost(live.monthly_usage ?? 0)}</div>
+                <div className="text-xs" style={{ color: "var(--text-faint)" }}>Credits used (Ollama&apos;s meter)</div>
+                <div className="mt-0.5 text-lg font-bold">
+                  {live.credits_used_usd != null
+                    ? `$${live.credits_used_usd.toFixed(2)} of $${live.credits_pool_usd?.toFixed(0)}`
+                    : `${((live.usage_fraction ?? 0) * 100).toFixed(1)}%`}
+                </div>
+                {live.credits_pool_usd != null && (
+                  <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full" style={{ background: "var(--card-border)" }}>
+                    <div
+                      className="h-full rounded-full transition-all"
+                      style={{
+                        width: `${Math.min(100, (live.usage_fraction ?? 0) * 100)}%`,
+                        background: (live.usage_fraction ?? 0) > 0.8 ? "var(--red)" : (live.usage_fraction ?? 0) > 0.5 ? "var(--amber)" : "var(--green)",
+                      }}
+                    />
+                  </div>
+                )}
               </div>
               <div>
                 <div className="text-xs" style={{ color: "var(--text-faint)" }}>Requests this window</div>
@@ -444,10 +461,10 @@ export default function UsagePage() {
           </div>
           <div className="card p-4">
             <div className="flex items-center gap-2 text-xs" style={{ color: "var(--text-faint)" }}>
-              <Coins className="h-3.5 w-3.5" style={{ color: "var(--green)" }} /> Est. metered cost
+              <Coins className="h-3.5 w-3.5" style={{ color: "var(--green)" }} /> Ledger cost estimate
             </div>
             <div className="mt-1 text-xl font-bold">{fmtCost(totals.cost_usd)}</div>
-            <div className="text-xs" style={{ color: "var(--text-faint)" }}>cached-input rates</div>
+            <div className="text-xs" style={{ color: "var(--text-faint)" }}>cached rates · not Ollama&apos;s meter</div>
           </div>
         </div>
       )}
@@ -496,7 +513,7 @@ export default function UsagePage() {
                   <th className="p-3 text-right font-medium">Calls</th>
                   <th className="p-3 text-right font-medium">Tokens in</th>
                   <th className="p-3 text-right font-medium">Tokens out</th>
-                  <th className="p-3 text-right font-medium">Est. cost</th>
+                  <th className="p-3 text-right font-medium">Est. cost (ledger)</th>
                 </tr>
               </thead>
               <tbody>
