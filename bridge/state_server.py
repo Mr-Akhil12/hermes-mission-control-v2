@@ -1017,6 +1017,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._proxy_api_get(path)
             elif path == "/api/model/options":
                 self._proxy_api_get(path)
+            elif path == "/api/usage":
+                self._usage_analytics()
+                return
             elif path == "/api/browser/shot":
                 self._browser_shot()
                 return
@@ -1489,6 +1492,127 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._json({"error": str(e)}, 502)
 
+    def _usage_analytics(self) -> None:
+        """GET /api/usage?provider=ollama-cloud&bucket=day|week|month&days=90&from=&to=
+
+        Aggregates the gateway's session_model_usage table (ground truth —
+        written by the agent core after every API call) into per-bucket token
+        in/out and request counts for the Mission Control usage graphs.
+        Costs use Ollama Cloud metered prices (per-M: in / cached-in / out).
+        """
+        import sqlite3 as _sq
+        from urllib.parse import urlparse, parse_qs, unquote
+
+        q = parse_qs(unquote(urlparse(self.path).query))
+        provider = (q.get("provider", ["ollama-cloud"])[0] or "ollama-cloud").strip().lower()
+        bucket = (q.get("bucket", ["day"])[0] or "day").strip().lower()
+        try:
+            days = max(1, min(int(q.get("days", ["90"])[0] or 90), 400))
+        except Exception:
+            days = 90
+        date_from = (q.get("from", [""])[0] or "").strip()
+        date_to = (q.get("to", [""])[0] or "").strip()
+
+        # Ollama Cloud metered prices ($/M tokens): model-prefix -> [in, cached-in, out]
+        PRICES = {
+            "glm-5.3-flash": (0.15, 0.03, 0.5),
+            "glm-5.3": (1.4, 0.26, 4.4),
+            "glm-5.2": (1.4, 0.26, 4.4),
+            "glm-5.1": (1.0, 0.2, 3.2),
+            "deepseek-v4-flash": (0.44, 0.014, 1.32),
+            "deepseek-v4-pro": (1.32, 0.044, 3.96),
+            "gemma4": (0.14, 0.05, 0.4),
+            "gpt-oss:120b": (0.15, 0.014, 0.6),
+            "gpt-oss:20b": (0.07, 0.035, 0.3),
+            "nemotron-3-super": (0.015, 0.015, 0.6),
+            "nemotron-3-ultra": (0.1, 0.1, 3.0),
+            "kimi-k3": (3.0, 0.3, 15.0),
+            "qwen3.5:397b": (0.6, 0.6, 3.6),
+        }
+
+        def _price(model: str):
+            m = (model or "").lower()
+            for prefix, p in PRICES.items():
+                if m.startswith(prefix):
+                    return p
+            return PRICES["glm-5.3-flash"]
+
+        # SQLite date buckets. first_seen/last_seen are epoch seconds; anchor
+        # the bucket to SAST (UTC+2) like every other Mission Control surface.
+        if bucket == "day":
+            fmt, step = "day", 1
+        elif bucket == "week":
+            fmt, step = "week", 7
+        elif bucket == "month":
+            fmt, step = "month", 30
+        else:  # custom — group by day over the given window
+            fmt, step = "day", 1
+
+        where = ["LOWER(COALESCE(billing_provider,'')) = ?"]
+        params = [provider]
+        if date_from:
+            where.append("first_seen >= strftime('%s', ? , '-2 hours')")
+            params.append(date_from)
+        if date_to:
+            where.append("first_seen <= strftime('%s', ?, '+2 hours', '+1 day')")
+            params.append(date_to)
+
+        sql = f"""
+            SELECT strftime('%Y-%m-%d', first_seen, 'unixepoch', '+2 hours') AS d,
+                   model,
+                   SUM(COALESCE(input_tokens,0)) AS tin,
+                   SUM(COALESCE(output_tokens,0)) AS tout,
+                   SUM(COALESCE(cache_read_tokens,0)) AS cache_read,
+                   SUM(COALESCE(api_call_count,0)) AS calls
+            FROM session_model_usage
+            WHERE {' AND '.join(where)}
+              AND first_seen >= strftime('%s','now','-{days} days')
+            GROUP BY d, model
+            ORDER BY d
+        """
+        try:
+            con = _sq.connect(str(STATE), timeout=10)
+            rows = con.execute(sql, params).fetchall()
+            con.close()
+        except Exception as e:
+            self._json({"error": f"usage query failed: {e}"}, 500)
+            return
+
+        # Aggregate by bucket
+        import datetime as _dt
+        series: dict = {}
+        totals = {"tokens_in": 0, "tokens_out": 0, "cache_read": 0, "requests": 0, "cost_usd": 0.0}
+        for d, model, tin, tout, cache, calls in rows:
+            key = d
+            if bucket == "week":
+                try:
+                    y, m, dd = map(int, d.split("-"))
+                    key = f"{_dt.date(y, m, dd).isocalendar()[0]}-W{_dt.date(y, m, dd).isocalendar()[1]:02d}"
+                except Exception:
+                    key = d
+            elif bucket == "month":
+                key = d[:7]
+            pin, pcache, pout = _price(model)
+            cost = (tin * pin + cache * pcache + tout * pout) / 1e6
+            b = series.setdefault(key, {"bucket": key, "tokens_in": 0, "tokens_out": 0, "requests": 0, "cost_usd": 0.0})
+            b["tokens_in"] += tin or 0
+            b["tokens_out"] += tout or 0
+            b["requests"] += calls or 0
+            b["cost_usd"] += cost
+            totals["tokens_in"] += tin or 0
+            totals["tokens_out"] += tout or 0
+            totals["cache_read"] += cache or 0
+            totals["requests"] += calls or 0
+            totals["cost_usd"] += cost
+
+        out_series = sorted(series.values(), key=lambda x: x["bucket"])
+        self._json({
+            "provider": provider,
+            "bucket": bucket,
+            "series": out_series,
+            "totals": {**totals, "cost_usd": round(totals["cost_usd"], 4)},
+        })
+
     def _exec_dashboard_command(self, name: str, arg: str) -> str | object:
         """Run a read-only dashboard command server-side, backed by real data.
 
@@ -1923,6 +2047,41 @@ class Handler(BaseHTTPRequestHandler):
         # never persisted. These endpoints call agent.steer()/interrupt()/goal
         # directly on the agent serving this session.
         session_id = payload.get("session_id") or ""
+        if name == "live":
+            # 2026-09-02 (unattached-run steer): does this session have a LIVE
+            # run right now? The PWA probes this before sending so a message
+            # typed into an unattached tab steers instead of queueing a second
+            # turn. Resolution: active_runs.json (chat-stream proxy), then the
+            # API's pollable run status (agent actually mid-turn).
+            if not session_id:
+                self._json({"ok": True, "name": "live", "live": False})
+                return
+            run_id = _get_active_run(session_id) or _get_active_run_by_any_key(session_id)
+            if not run_id:
+                # active_runs.json is proxy-stream-scoped; a run started by a
+                # client that later disconnected may still be executing. Ask
+                # the API's run status registry before answering "no".
+                import urllib.request as _u
+                api = os.environ.get("HERMES_API_URL", "http://127.0.0.1:18642")
+                api_key = os.environ.get("API_SERVER_KEY", "")
+                try:
+                    req = _u.Request(f"{api}/api/runs/live", headers=(
+                        {"Authorization": f"Bearer {api_key}"} if api_key else {}))
+                    with _u.urlopen(req, timeout=6) as resp:
+                        data = _json.loads(resp.read() or b"{}")
+                    for r in (data.get("runs") or []):
+                        if (r.get("session_id") in (session_id, payload.get("session_id"))
+                                and r.get("status") == "running"):
+                            import time as _time
+                            if _time.time() - float(r.get("updated_at", 0) or 0) < 900:
+                                self._json({"ok": True, "name": "live", "live": True, "run_id": r.get("run_id")})
+                                return
+                except Exception:
+                    pass
+                self._json({"ok": True, "name": "live", "live": False})
+                return
+            self._json({"ok": True, "name": "live", "live": True, "run_id": run_id})
+            return
         if name == "steer" and session_id:
             self._json({"ok": True, "name": "steer", "output": self._session_steer(session_id, arg)})
             return
@@ -2468,6 +2627,25 @@ class Handler(BaseHTTPRequestHandler):
                             m = re.search(rb'"run_id":\s*"(run_[0-9a-f]+)"', chunk)
                             if m:
                                 _set_active_run(session_for_run, m.group(1).decode())
+                            else:
+                                # 2026-09-02 FIX (tracker miss): the run_id can
+                                # sit in the SAME chunk as any other frame —
+                                # the API server wraps run_id into EVERY event
+                                # payload, and SSE frames can straddle 4096-
+                                # byte read boundaries. Keep a rolling tail so
+                                # a run_id split across chunks still matches;
+                                # without this, active_runs.json stays empty
+                                # and steer/stop/reattach all report
+                                # "no_active_run" while the run is live.
+                                if not getattr(self, "_rr_tail", None):
+                                    self._rr_tail = b""
+                                scan = self._rr_tail + chunk
+                                m2 = re.search(rb'"run_id":\s*"(run_[0-9a-f]+)"', scan)
+                                if m2:
+                                    _set_active_run(session_for_run, m2.group(1).decode())
+                                    self._rr_tail = b""
+                                else:
+                                    self._rr_tail = scan[-512:]
                             if b"event: run.completed" in chunk or b"event: done" in chunk:
                                 _clear_active_run(session_for_run)
                                 seen_done = True

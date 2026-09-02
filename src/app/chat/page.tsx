@@ -1253,7 +1253,12 @@ export default function ChatPage() {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(
                 {
-                  model: arg,
+                  // 2026-09-02 FIX (--global poisoning): the raw arg could
+                  // carry CLI scope flags ("glm-5.3-flash --global",
+                  // "--provider x"). Persisting them into the model id made
+                  // every later turn 404 upstream. Strip flag tokens here;
+                  // the server's lock writer sanitizes too (defense in depth).
+                  model: arg.split(/\s+--\w+/)[0].trim(),
                   require_model_lock: false,
                   // Track the provider the user picked in the wizard (when
                   // they picked from the dynamic list) so the gateway builds
@@ -1648,6 +1653,45 @@ export default function ChatPage() {
           { role: "system", content: steerAck },
         ]);
         return;
+      }
+
+      // 2026-09-02 FIX (unattached-run steer): this tab may not be attached to
+      // a LIVE run (reload, second device, missed run.started) while the
+      // session's agent is actually mid-turn — busyRef is blind to that and a
+      // plain send becomes a silently-queued second turn. Ask the state server
+      // whether the session has a live run before choosing steer vs send.
+      try {
+        const probe = await fetch("/api/chat/command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ command: "/live", session_id: sessionId }),
+        });
+        const pdata = await probe.json().catch(() => null);
+        if (pdata?.live) {
+          // A run IS live server-side even though this tab isn't busy —
+          // route through the real steer path so it lands at the next
+          // tool boundary, and surface the server's honest ack.
+          let steerAck = "";
+          try {
+            const res = await fetch("/api/chat/command", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ command: `/steer ${trimmed}`, session_id: sessionId }),
+            });
+            const data = await res.json();
+            steerAck = data?.output ?? "⚠️ Steer could not be delivered — send it as a normal message.";
+          } catch {
+            steerAck = "⚠️ Steer failed to send (network). Send it as a normal message instead.";
+          }
+          setMessages((m) => [
+            ...m,
+            { role: "user", content: trimmed },
+            { role: "system", content: steerAck },
+          ]);
+          return;
+        }
+      } catch {
+        // Probe failure = fall through to normal send (never block a message).
       }
 
       if (sessionId) draftsRef.current[sessionId] = "";
