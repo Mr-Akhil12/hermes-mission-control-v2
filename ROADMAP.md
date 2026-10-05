@@ -36,7 +36,7 @@ Legend: ✅ live · 🟡 partial/demo · ⬜ not started
 | Channels (/channels) | ✅ | gateway_state + channel_directory + delivery_obligations | Real platform states (discord/webhook/api connected, telegram/slack retrying), 35 channels, 30 delivery log — verified 8 Aug |
 | Chat + Voice (/chat) | ✅ | ngrok tunnel → :8645 → :8642 | **v2: conversation history, SSE streaming, thinking stream, persisted sessions** — verified 7 Aug |
 | Content Studio (/studio) | ✅ | Obsidian vault via state server | Kanban (idea→drafted→approved→scheduled→posted), calendar view, platform filters, status writes back to vault — verified 8 Aug |
-| Trading (/trading) | ✅ | Turso (akhils-trading DB) | Net P&L, win rate, profit factor, risk meter, recent trades table — verified 8 Aug |
+| Trading (/trading) | ✅ | Turso + Yellow reports | Yellow cockpit Phase A: session clock SAST, day lock, levels/bias/skip-take, report ingest, journal — Oct 2026 |
 | Development (/dev) | ✅ | GitHub + artifacts | Artifact search real, **bridge auto-logs repos to Turso every ~2 min** |
 | Personal (/personal) | ✅ | Hermes memory + Obsidian vault | Memory wiki (12+13 entries), vault folder grid → note list → full reader — verified 8 Aug |
 | Native UI (/native) | ✅ | /native-proxy same-origin + WS via funnel | Full embed: login, dashboard, live WS — verified 7 Aug |

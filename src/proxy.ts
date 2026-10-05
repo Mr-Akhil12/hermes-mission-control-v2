@@ -15,6 +15,8 @@ const PUBLIC_PATHS = new Set([
   "/api/auth/verify",
   "/api/push/vapid",
   "/api/health",
+  // Yellow bot ingest — auth is YELLOW_INGEST_TOKEN (or session) inside the route.
+  "/api/trading/report",
 ]);
 
 const RATE_WINDOW_MS = 15 * 60 * 1000;

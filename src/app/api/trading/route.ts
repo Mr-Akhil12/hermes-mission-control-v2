@@ -1,38 +1,118 @@
 import { NextResponse } from "next/server";
+import { tursoConfigured, tursoQuery } from "@/lib/turso-trading";
+import {
+  computeDayState,
+  getSessionClock,
+  yellowAccountFromEnv,
+  YELLOW_RULES,
+  YELLOW_RULES_FALLBACK,
+} from "@/lib/yellow";
 
-// Trading: read trades + strategy from Turso (the akhils-trading app's DB).
-const TURSO_URL = process.env.TURSO_URL ?? "";
-const TURSO_TOKEN = process.env.TURSO_TOKEN ?? "";
+export const dynamic = "force-dynamic";
 
-async function tursoQuery(sql: string): Promise<any[]> {
-  const body = JSON.stringify({ requests: [{ type: "execute", stmt: { sql } }] });
-  const res = await fetch(`${TURSO_URL}/v2/pipeline`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${TURSO_TOKEN}`, "Content-Type": "application/json" },
-    body,
-    signal: AbortSignal.timeout(8000),
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`turso ${res.status}`);
-  const data = await res.json();
-  const result = data?.results?.[0]?.response?.result;
-  if (!result) return [];
-  const cols = result.cols.map((c: any) => c.name);
-  return result.rows.map((row: any[]) => Object.fromEntries(row.map((v, i) => [cols[i], v?.value])));
+async function loadTrades(): Promise<Record<string, unknown>[]> {
+  // Prefer Yellow-sourced rows when `source` column exists; fall back without it.
+  try {
+    return await tursoQuery(
+      `SELECT id, direction, symbol, entry, sl, tp, close_price, result, rr, volume, profit, account, opened_at, closed_at, source
+       FROM trades
+       ORDER BY
+         CASE WHEN lower(coalesce(source,'')) = 'yellow' THEN 0 ELSE 1 END,
+         opened_at DESC
+       LIMIT 200`
+    );
+  } catch {
+    return await tursoQuery(
+      `SELECT id, direction, symbol, entry, sl, tp, close_price, result, rr, volume, profit, account, opened_at, closed_at
+       FROM trades ORDER BY opened_at DESC LIMIT 200`
+    );
+  }
+}
+
+async function loadStrategy(): Promise<Record<string, unknown>[]> {
+  try {
+    return await tursoQuery(
+      "SELECT id, title, body, updated_at FROM strategy ORDER BY updated_at DESC LIMIT 20"
+    );
+  } catch {
+    return [];
+  }
+}
+
+async function loadLastReport(): Promise<Record<string, unknown> | null> {
+  try {
+    const rows = await tursoQuery(
+      `SELECT id, created_at, symbol, bias, levels, decision, entry, sl, tp, lot,
+              hold_seconds, margin, pnl, balance, equity, session_window, notes
+       FROM yellow_reports ORDER BY created_at DESC LIMIT 1`
+    );
+    return rows[0] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export async function GET() {
   try {
-    if (!TURSO_URL || !TURSO_TOKEN) {
+    if (!tursoConfigured()) {
       return NextResponse.json({ error: "Turso not configured" }, { status: 503 });
     }
-    const [trades, strategy] = await Promise.all([
-      tursoQuery(
-        "SELECT id, direction, symbol, entry, sl, tp, close_price, result, rr, volume, profit, account, opened_at, closed_at FROM trades ORDER BY opened_at DESC LIMIT 200"
-      ),
-      tursoQuery("SELECT id, title, body, updated_at FROM strategy ORDER BY updated_at DESC LIMIT 20"),
+
+    const clock = getSessionClock();
+    const account = yellowAccountFromEnv();
+
+    const [trades, strategyRows, lastReport] = await Promise.all([
+      loadTrades(),
+      loadStrategy(),
+      loadLastReport(),
     ]);
-    return NextResponse.json({ trades, strategy, source: "turso" });
+
+    const { dayState, todayLosses, todayWins, todayPnl } = computeDayState(
+      trades as Parameters<typeof computeDayState>[0],
+      clock
+    );
+
+    const strategy =
+      strategyRows.length > 0
+        ? strategyRows
+        : YELLOW_RULES_FALLBACK.map((r, i) => ({
+            id: `yellow-fallback-${i}`,
+            title: r.title,
+            body: r.body,
+            updated_at: null,
+          }));
+
+    // Account strip numbers: prefer last report balance/equity/margin, else hints.
+    const balance =
+      lastReport?.balance != null ? Number(lastReport.balance) : account.startingBalanceHint;
+    const equity =
+      lastReport?.equity != null
+        ? Number(lastReport.equity)
+        : lastReport?.pnl != null
+          ? balance + Number(lastReport.pnl)
+          : balance;
+    const margin = lastReport?.margin != null ? Number(lastReport.margin) : null;
+
+    return NextResponse.json({
+      source: "turso",
+      rules: YELLOW_RULES,
+      account: {
+        ...account,
+        balance,
+        equity,
+        margin,
+      },
+      session: clock,
+      day: {
+        state: dayState,
+        todayLosses,
+        todayWins,
+        todayPnl,
+      },
+      lastReport,
+      trades,
+      strategy,
+    });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 502 });
   }
